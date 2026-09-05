@@ -1,0 +1,141 @@
+# Screenshotter Slack bridge — configuration template.
+#
+# Copy this file to config.toml and edit before running. Pass its path with
+# --config (defaults to ./config.toml).
+#
+# The bridge connects to Slack over Socket Mode (an outbound WebSocket), so the
+# screenshotter server it reads from does NOT need to be reachable from the
+# public internet — only the bridge needs outbound HTTPS access to Slack.
+
+# ---------------------------------------------------------------------------
+# Screenshotter server
+# ---------------------------------------------------------------------------
+
+# How the screenshot image is supplied to Slack's unfurl:
+#
+#   "upload"      (default) The bridge FETCHES the PNG over the (possibly
+#                 private) network, uploads it to Slack, and makes it public via
+#                 files.sharedPublicURL so the unfurl can load it. Works even
+#                 when the screenshotter server is NOT reachable from the
+#                 internet. Needs the files:write scope. Note: each rendered
+#                 screenshot becomes retrievable by anyone who has the
+#                 (unguessable) slack-files.com URL.
+#   "public_url"  The bridge points Slack at the image on screenshotter_base_url
+#                 directly — no download, no upload, no file scopes. Requires
+#                 base_url to be reachable by Slack's servers and to serve PNGs
+#                 without auth (require_auth_to_view = false).
+#   "none"        No in-place unfurl: the bridge posts the screenshot as a
+#                 threaded file reply, which stays workspace-private (never made
+#                 public). Requires the bot to be in the channel and the
+#                 files:write scope.
+#
+# The unfurl modes (upload, public_url) fall back to the same threaded file post
+# when the in-place unfurl can't be produced, so files:write is useful there too.
+# NOTE: "upload" is not fully implemented yet — it needs a user token for
+# files.sharedPublicURL (see plans/slack-bridge-upload-mode-user-token.md); until
+# then it degrades to the threaded fallback.
+image_mode = "upload"
+
+# Canonical base URL of the screenshotter server (no trailing slash). It is the
+# single source of truth for the image and the "open on <host>" button; the
+# posted link only supplies the image ID. In "upload" mode the bridge fetches the
+# PNG from here, so it may be a private address (e.g. on your tailnet). In
+# "public_url" mode Slack loads the image from here directly, so it must be a
+# public, Slack-reachable URL. Required in both modes.
+screenshotter_base_url = "http://screenshotter.internal:8080"
+
+# Hostnames that, when posted in Slack, this bridge should unfurl. These must
+# match the "App unfurl domains" registered in your Slack app AND the hostnames
+# used in your screen/{id} links. Matching is case-insensitive. You can list
+# several. A bare single-label host like "screen" works too (confirmed) — the
+# image is loaded from screenshotter_base_url, not the link host — as long as the
+# posted link carries an explicit scheme (e.g. "http://screen/abcdef"); a
+# scheme-less "screen/abcdef" won't be linkified by Slack.
+# Any single-segment path on these hosts is treated as an image ID, except known
+# server endpoints (see excluded_paths below). The link may omit the .png suffix.
+unfurl_domains = ["screen.corp.example"]
+
+# Each unfurl gets an "open on <host>" button linking back to the screenshot's
+# page on the host the user shared (derived from the link — no extra config). The
+# unfurl also shows the screenshot's title and an "open the source url" button
+# when the server sends the X-Screenshot-Title / X-Screenshot-Source-Url headers
+# on the image response. NOTE: the buttons require Interactivity to be enabled in
+# the Slack app (see docs/slack.md); without it, Slack will not render them.
+
+# ---------------------------------------------------------------------------
+# Slack credentials
+# ---------------------------------------------------------------------------
+# Prefer the *_env_var forms so secrets are not written to disk. Set either the
+# inline value OR the env var for each token, not both.
+
+# Bot token (xoxb-...). Created when you install the app to your workspace.
+# bot_token = "xoxb-..."
+bot_token_env_var = "SLACK_BOT_TOKEN"
+
+# App-level token (xapp-...) with the connections:write scope, used for Socket
+# Mode. Created under "Basic Information > App-Level Tokens".
+# app_token = "xapp-..."
+app_token_env_var = "SLACK_APP_TOKEN"
+
+# ---------------------------------------------------------------------------
+# Image handling
+# ---------------------------------------------------------------------------
+
+# Cap the largest side (width or height) of an uploaded image, in pixels.
+# Larger screenshots are downscaled (aspect ratio preserved) before upload,
+# which bounds upload size and latency. 0 (default) uploads full-resolution
+# PNGs and lets Slack generate its own preview thumbnails.
+# max_dimension = 0
+
+# ---------------------------------------------------------------------------
+# Limits (resource / abuse protection)
+# ---------------------------------------------------------------------------
+
+# Timeout applied to each outbound request: fetching an image AND each Slack API
+# call (upload, unfurl, user/usergroup lookups). Default: 30s.
+# request_timeout = "30s"
+
+# Maximum number of link_shared events handled in parallel (the network/Slack
+# work). Events beyond this are dropped rather than queued, so handler goroutines
+# can't pile up unbounded under a flood. Default: 50.
+# max_concurrency = 50
+
+# Maximum number of images decoded/resized in parallel. Image conversion is the
+# memory-heavy step (a decoded image is much larger than its PNG), so it is
+# bounded separately from — and more tightly than — max_concurrency. Default: 4.
+# max_image_workers = 4
+
+# Maximum number of screenshot links rendered from a single Slack message,
+# limiting amplification from one post. Default: 4.
+# max_links_per_message = 4
+
+# Additional first path segments to never treat as image IDs, on top of the
+# built-in list of known server endpoints (upload, assets, static, thumb, admin,
+# auth, favicon.ico). Matched case-insensitively.
+# excluded_paths = []
+
+# ---------------------------------------------------------------------------
+# User restrictions (optional)
+# ---------------------------------------------------------------------------
+# By default the bridge renders screenshots for anyone who can post in a channel
+# it is in. The options below narrow that. Both fail closed: if Slack cannot be
+# queried to evaluate the rule, the share is ignored.
+
+# Ignore link_shared events from users external to the workspace: Slack Connect
+# strangers, users from a different team, and guests (single/multi-channel).
+# Requires the users:read bot scope. Default: false.
+# block_external_users = false
+
+# Restrict rendering to members of these Slack user groups (by group ID, e.g.
+# "S0123ABCD"). Empty means no group restriction. Requires the usergroups:read
+# bot scope. Default: [].
+# allowed_usergroups = []
+
+# ---------------------------------------------------------------------------
+# Debugging
+# ---------------------------------------------------------------------------
+
+# Verbose logging of the Socket Mode connection and Slack API calls.
+# WARNING: debug output can include the bot token and other sensitive data — do
+# not enable it in production. Default: false.
+# debug = false
