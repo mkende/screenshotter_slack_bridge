@@ -25,7 +25,7 @@ import (
 // fakeAPI records calls to the Slack API for assertions.
 type fakeAPI struct {
 	mu         sync.Mutex
-	uploads    []slack.UploadFileV2Parameters
+	uploads    []slack.UploadFileParameters
 	unfurls    int
 	unfurled   map[string]slack.Attachment
 	nextFileID string
@@ -33,7 +33,7 @@ type fakeAPI struct {
 	uploadErr  error
 	shareErr   error
 
-	uploadHook func() // called inside UploadFileV2Context, outside the lock
+	uploadHook func() // called inside UploadFileContext, outside the lock
 
 	users        map[string]*slack.User
 	userErr      error
@@ -41,7 +41,7 @@ type fakeAPI struct {
 	groupErr     error
 }
 
-func (f *fakeAPI) UploadFileV2Context(_ context.Context, p slack.UploadFileV2Parameters) (*slack.FileSummary, error) {
+func (f *fakeAPI) UploadFileContext(_ context.Context, p slack.UploadFileParameters) (*slack.FileSummary, error) {
 	f.mu.Lock()
 	f.uploads = append(f.uploads, p)
 	hook := f.uploadHook
@@ -98,7 +98,7 @@ func (f *fakeAPI) GetUserInfoContext(_ context.Context, user string) (*slack.Use
 	return u, nil
 }
 
-func (f *fakeAPI) GetUserGroupMembersContext(_ context.Context, group string) ([]string, error) {
+func (f *fakeAPI) GetUserGroupMembersContext(_ context.Context, group string, _ ...slack.GetUserGroupMembersOption) ([]string, error) {
 	if f.groupErr != nil {
 		return nil, f.groupErr
 	}

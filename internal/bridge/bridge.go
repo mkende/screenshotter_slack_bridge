@@ -53,11 +53,11 @@ var defaultReservedPaths = []string{
 
 // slackAPI is the subset of the Slack client the bridge uses.
 type slackAPI interface {
-	UploadFileV2Context(ctx context.Context, params slack.UploadFileV2Parameters) (*slack.FileSummary, error)
+	UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
 	ShareFilePublicURLContext(ctx context.Context, fileID string) (*slack.File, []slack.Comment, *slack.Paging, error)
 	UnfurlMessageContext(ctx context.Context, channelID, timestamp string, unfurls map[string]slack.Attachment, options ...slack.MsgOption) (string, string, string, error)
 	GetUserInfoContext(ctx context.Context, user string) (*slack.User, error)
-	GetUserGroupMembersContext(ctx context.Context, userGroup string) ([]string, error)
+	GetUserGroupMembersContext(ctx context.Context, userGroup string, options ...slack.GetUserGroupMembersOption) ([]string, error)
 }
 
 // Bridge renders screenshotter links into Slack.
@@ -267,7 +267,7 @@ func (b *Bridge) postImageReply(ctx context.Context, ev *slackevents.LinkSharedE
 		threadTS = ev.MessageTimeStamp
 	}
 	filename := id + ".png"
-	if _, err := b.uploadFile(ctx, slack.UploadFileV2Parameters{
+	if _, err := b.uploadFile(ctx, slack.UploadFileParameters{
 		Filename:        filename,
 		Title:           filename,
 		FileSize:        len(data),
@@ -302,7 +302,7 @@ func (b *Bridge) uploadPublicImage(ctx context.Context, id, alt string) (string,
 	}
 
 	filename := id + ".png"
-	summary, err := b.uploadFile(ctx, slack.UploadFileV2Parameters{
+	summary, err := b.uploadFile(ctx, slack.UploadFileParameters{
 		Filename: filename,
 		Title:    filename,
 		FileSize: len(data),
@@ -401,10 +401,10 @@ func (b *Bridge) resize(ctx context.Context, data []byte) ([]byte, error) {
 }
 
 // uploadFile uploads to Slack with a per-request timeout.
-func (b *Bridge) uploadFile(ctx context.Context, params slack.UploadFileV2Parameters) (*slack.FileSummary, error) {
+func (b *Bridge) uploadFile(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error) {
 	uctx, cancel := context.WithTimeout(ctx, b.cfg.RequestTimeout.Duration)
 	defer cancel()
-	return b.api.UploadFileV2Context(uctx, params)
+	return b.api.UploadFileContext(uctx, params)
 }
 
 // publicFileURL makes an uploaded file publicly retrievable and returns a direct
