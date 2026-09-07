@@ -1,0 +1,22 @@
+# prek hooks for the slack component; see the workspace root config. Hooks run
+# from this directory, so they delegate to the recipes in .justfile and stay in
+# step with what CI runs.
+repos:
+  - repo: local
+    hooks:
+      - id: slack-check-format
+        name: slack · check-format
+        entry: just check-format
+        language: system
+        pass_filenames: false
+      - id: slack-lint
+        name: slack · lint
+        entry: just lint
+        language: system
+        pass_filenames: false
+      - id: slack-test
+        name: slack · test
+        entry: just test
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
