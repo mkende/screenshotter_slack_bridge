@@ -6,9 +6,12 @@ test:
     go test ./...
 
 # Run go vet and staticcheck.
+# GOTOOLCHAIN pins the toolchain staticcheck analyses with: v0.8.1 cannot parse
+# the Go 1.27 standard library this module's toolchain directive selects. Drop
+# the pin once a staticcheck release supports Go 1.27 (see issue #50).
 lint:
     go vet ./...
-    go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+    GOTOOLCHAIN=go1.26.8 go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
 
 # Format all Go source files in place.
 format:
