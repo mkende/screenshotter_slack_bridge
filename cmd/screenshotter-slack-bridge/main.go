@@ -82,6 +82,10 @@ func main() {
 	}()
 
 	logger.Printf("screenshotter slack bridge %s starting (image_mode: %s, unfurl domains: %v)", version.Version, cfg.ImageMode, cfg.UnfurlDomains)
+	// RunContext only returns once a reconnection has failed, so today it never
+	// returns nil and staticcheck flags the check as always true. Keep testing
+	// err: a nil-on-clean-exit return is within its documented contract.
+	//lint:ignore SA4023 the nil check follows the contract, not the implementation
 	if err := sm.RunContext(ctx); err != nil && ctx.Err() == nil {
 		logger.Fatalf("socket mode: %v", err)
 	}
