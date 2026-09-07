@@ -3,7 +3,7 @@
 ## Build stage
 # Pinned to a digest for supply-chain safety; the readable tag documents the
 # version. Renovate keeps both the tag and the digest up to date (see docs/ci.md).
-FROM golang:1.26-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS builder
+FROM golang:1.26-alpine@sha256:ce864e7223ac17b1775e6fd0b4c0db580c2eb50e7953a427916379e4b92a1628 AS builder
 
 WORKDIR /build
 
