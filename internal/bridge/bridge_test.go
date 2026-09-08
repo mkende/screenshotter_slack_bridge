@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,20 +21,35 @@ import (
 	"github.com/slack-go/slack/slackevents"
 
 	"github.com/mkende/screenshotter_slack_bridge/internal/config"
+	"github.com/mkende/screenshotter_slack_bridge/internal/imageproc"
 )
+
+// remoteAdd is one recorded files.remote.add call, with the preview image read
+// out of its reader so assertions can decode it.
+type remoteAdd struct {
+	params  slack.RemoteFileParameters
+	preview []byte
+}
 
 // fakeAPI records calls to the Slack API for assertions.
 type fakeAPI struct {
-	mu         sync.Mutex
-	uploads    []slack.UploadFileParameters
-	unfurls    int
-	unfurled   map[string]slack.Attachment
-	nextFileID string
-	unfurlErr  error
-	uploadErr  error
-	shareErr   error
+	mu       sync.Mutex
+	adds     []remoteAdd
+	infos    int
+	unfurls  int
+	unfurled map[string]slack.Attachment
 
-	uploadHook func() // called inside UploadFileContext, outside the lock
+	unfurlErr error
+	addErr    error
+	infoErr   error
+	// firstPollAfter is the number of files.remote.add calls that had completed
+	// when files.remote.info was first called.
+	firstPollAfter int
+	// richAfter is how many files.remote.info calls report the preview as not
+	// ready before one reports it ready. 0 means ready on the first call.
+	richAfter int
+
+	addHook func() // called inside AddRemoteFileContext, outside the lock
 
 	users        map[string]*slack.User
 	userErr      error
@@ -41,36 +57,40 @@ type fakeAPI struct {
 	groupErr     error
 }
 
-func (f *fakeAPI) UploadFileContext(_ context.Context, p slack.UploadFileParameters) (*slack.FileSummary, error) {
+func (f *fakeAPI) AddRemoteFileContext(_ context.Context, p slack.RemoteFileParameters) (*slack.RemoteFile, error) {
+	var preview []byte
+	if p.PreviewImageReader != nil {
+		var err error
+		if preview, err = io.ReadAll(p.PreviewImageReader); err != nil {
+			return nil, err
+		}
+		p.PreviewImageReader = nil // recorded as preview instead
+	}
 	f.mu.Lock()
-	f.uploads = append(f.uploads, p)
-	hook := f.uploadHook
-	uerr := f.uploadErr
+	f.adds = append(f.adds, remoteAdd{params: p, preview: preview})
+	hook := f.addHook
+	aerr := f.addErr
 	f.mu.Unlock()
 	if hook != nil {
 		hook()
 	}
-	if uerr != nil {
-		return nil, uerr
+	if aerr != nil {
+		return nil, aerr
 	}
-	return &slack.FileSummary{ID: f.nextFileID}, nil
+	return &slack.RemoteFile{ID: "F1", ExternalID: p.ExternalID}, nil
 }
 
-// publicImageURL is the directly-loadable image URL the fake yields for an
-// uploaded file ID, matching publicImageURLFromFile's url_private + pub_secret.
-func fakePublicImageURL(fileID string) string {
-	return "https://files.slack.test/files-pri/T1-" + fileID + "/" + fileID + ".png?pub_secret=s3cr3t"
-}
-
-func (f *fakeAPI) ShareFilePublicURLContext(_ context.Context, fileID string) (*slack.File, []slack.Comment, *slack.Paging, error) {
-	if f.shareErr != nil {
-		return nil, nil, nil, f.shareErr
+func (f *fakeAPI) GetRemoteFileInfoContext(_ context.Context, externalID, _ string) (*slack.RemoteFile, error) {
+	if f.infoErr != nil {
+		return nil, f.infoErr
 	}
-	return &slack.File{
-		ID:              fileID,
-		URLPrivate:      "https://files.slack.test/files-pri/T1-" + fileID + "/" + fileID + ".png",
-		PermalinkPublic: "https://slack-files.test/T1-" + fileID + "-s3cr3t",
-	}, nil, nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.infos == 0 {
+		f.firstPollAfter = len(f.adds)
+	}
+	f.infos++
+	return &slack.RemoteFile{ExternalID: externalID, HasRichPreview: f.infos > f.richAfter}, nil
 }
 
 func (f *fakeAPI) UnfurlMessageContext(_ context.Context, _, _ string, unfurls map[string]slack.Attachment, _ ...slack.MsgOption) (string, string, string, error) {
@@ -105,10 +125,16 @@ func (f *fakeAPI) GetUserGroupMembersContext(_ context.Context, group string, _ 
 	return f.groupMembers[group], nil
 }
 
-func (f *fakeAPI) uploadCount() int {
+func (f *fakeAPI) addCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.uploads)
+	return len(f.adds)
+}
+
+func (f *fakeAPI) infoCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.infos
 }
 
 func testPNG(t *testing.T, w, h int) []byte {
@@ -150,33 +176,38 @@ func pngServerWithMeta(t *testing.T, data []byte, title, source string) (*httpte
 	return srv, &hits
 }
 
-// unfurlBlocks returns the blocks of the unfurl recorded for link.
-func unfurlBlocks(t *testing.T, api *fakeAPI, link string) []slack.Block {
+// unfurlFor returns the unfurl attachment recorded for link.
+func unfurlFor(t *testing.T, api *fakeAPI, link string) slack.Attachment {
 	t.Helper()
 	att, ok := api.unfurled[link]
 	if !ok {
 		t.Fatalf("no unfurl recorded for %q; got %v", link, api.unfurled)
 	}
-	return att.Blocks.BlockSet
+	return att
 }
 
-// buttonURLs returns the url buttons in an actions block as label->URL, or nil
-// if there is no actions block.
-func buttonURLs(blocks []slack.Block) map[string]string {
-	for _, blk := range blocks {
-		ab, ok := blk.(*slack.ActionBlock)
-		if !ok || ab.Elements == nil {
-			continue
-		}
-		out := map[string]string{}
-		for _, el := range ab.Elements.ElementSet {
-			if btn, ok := el.(*slack.ButtonBlockElement); ok {
-				out[btn.Text.Text] = btn.URL
-			}
-		}
-		return out
+// onlyFileBlock returns the unfurl's single file block, failing if the unfurl
+// carries anything else: Slack rejects a file block combined with other blocks.
+func onlyFileBlock(t *testing.T, blocks []slack.Block) *slack.FileBlock {
+	t.Helper()
+	if len(blocks) != 1 {
+		t.Fatalf("unfurl should carry exactly one block, got %d: %v", len(blocks), blocks)
 	}
-	return nil
+	fb, ok := blocks[0].(*slack.FileBlock)
+	if !ok {
+		t.Fatalf("unfurl block should be a file block, got %T", blocks[0])
+	}
+	return fb
+}
+
+// previewDims decodes the recorded preview image's dimensions.
+func previewDims(t *testing.T, data []byte) (int, int) {
+	t.Helper()
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	return cfg.Width, cfg.Height
 }
 
 func newTestBridge(t *testing.T, api slackAPI, cfg *config.Config) *Bridge {
@@ -188,11 +219,14 @@ func baseConfig(baseURL string) *config.Config {
 	return &config.Config{
 		ScreenshotterBaseURL: baseURL,
 		UnfurlDomains:        []string{"screen.corp.example", "screen"},
-		MaxDimension:         0,
-		RequestTimeout:       config.TOMLDuration{Duration: 5 * time.Second},
-		MaxConcurrency:       50,
-		MaxImageWorkers:      4,
-		MaxLinksPerMessage:   4,
+		MaxDimension:         1600,
+		// The preview wait is exercised by its own test; elsewhere it would only
+		// add polling to every case.
+		PreviewWait:        config.TOMLDuration{Duration: 0},
+		RequestTimeout:     config.TOMLDuration{Duration: 5 * time.Second},
+		MaxConcurrency:     50,
+		MaxImageWorkers:    4,
+		MaxLinksPerMessage: 4,
 	}
 }
 
@@ -243,16 +277,6 @@ func hostOf(t *testing.T, raw string) string {
 	return u.Hostname()
 }
 
-// mustParseHost returns the host:port of raw (the canonical-button label form).
-func mustParseHost(t *testing.T, raw string) string {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u.Host
-}
-
 func linkEvent() *slackevents.LinkSharedEvent {
 	return &slackevents.LinkSharedEvent{
 		User:             "U1",
@@ -262,63 +286,39 @@ func linkEvent() *slackevents.LinkSharedEvent {
 	}
 }
 
-func TestRenderInlineUnfurl(t *testing.T) {
-	srv := pngServer(t, testPNG(t, 10, 10))
+func TestRenderUnfurlsWithASingleFileBlock(t *testing.T) {
+	srv := pngServer(t, testPNG(t, 800, 600))
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
 	b := newTestBridge(t, api, baseConfig(srv.URL))
 	b.HandleLinkShared(context.Background(), "T1", linkEvent())
 
-	if len(api.uploads) != 1 {
-		t.Fatalf("expected 1 upload, got %d", len(api.uploads))
-	}
-	if api.uploads[0].Channel != "" {
-		t.Errorf("inline-unfurl upload should be unshared, got channel %q", api.uploads[0].Channel)
+	if len(api.adds) != 1 {
+		t.Fatalf("expected 1 files.remote.add, got %d", len(api.adds))
 	}
 	if api.unfurls != 1 {
-		t.Errorf("expected 1 unfurl, got %d", api.unfurls)
+		t.Fatalf("expected 1 unfurl, got %d", api.unfurls)
+	}
+	att := unfurlFor(t, api, "https://screen.corp.example/abcdef")
+	fb := onlyFileBlock(t, att.Blocks.BlockSet)
+	// The block must name the file that was just added, not the image ID.
+	if want := api.adds[0].params.ExternalID; fb.ExternalID != want || fb.Source != "remote" {
+		t.Errorf("file block = (external_id %q, source %q), want (%q, %q)", fb.ExternalID, fb.Source, want, "remote")
+	}
+	if !att.HideColor {
+		t.Error("unfurl should set hide_color, dropping the card's colour bar")
 	}
 }
 
-func TestUnfurlWithoutMetadataHasNoTitleAndOnlyCanonicalButton(t *testing.T) {
-	// No metadata headers: the image has no caption and no source button, but the
-	// "open on <host>" button is always present (derived from the shared link).
-	srv := pngServer(t, testPNG(t, 10, 10))
+func TestRemoteFileLinksToTheBaseURLPageNotTheLinkHost(t *testing.T) {
+	// The card's click-through is the screenshot's page on base_url; the posted
+	// link's host only supplies the ID and keys the unfurl.
+	srv, hits := pngServerWithMeta(t, testPNG(t, 800, 600), "Login & checkout", "https://app.example/checkout")
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
-	b := newTestBridge(t, api, baseConfig(srv.URL))
-	b.HandleLinkShared(context.Background(), "T1", linkEvent())
-
-	blocks := unfurlBlocks(t, api, "https://screen.corp.example/abcdef")
-	img, ok := blocks[0].(*slack.ImageBlock)
-	if !ok {
-		t.Fatalf("first block should be an image block, got %T", blocks[0])
-	}
-	if img.ImageURL != fakePublicImageURL("F123") {
-		t.Errorf("image URL = %q, want %q", img.ImageURL, fakePublicImageURL("F123"))
-	}
-	if img.Title != nil {
-		t.Errorf("image should have no title, got %q", img.Title.Text)
-	}
-	btns := buttonURLs(blocks)
-	canon := "open on " + mustParseHost(t, srv.URL)
-	if len(btns) != 1 || btns[canon] != srv.URL+"/abcdef" {
-		t.Errorf("expected only the canonical (base_url) button, got %v", btns)
-	}
-}
-
-func TestPublicURLModeUsesBaseURLNotLink(t *testing.T) {
-	// In public_url mode the image, metadata, and button all come from base_url —
-	// not the posted link's host, which only supplies the ID and the unfurl key.
-	// base_url here is the test server; the shared link is a different host.
-	srv, hits := pngServerWithMeta(t, testPNG(t, 10, 10), "Login & checkout", "https://app.example/checkout")
-	defer srv.Close()
-
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
 	cfg := baseConfig(srv.URL) // base_url = the test server
-	cfg.ImageMode = config.ImageModePublicURL
 	cfg.UnfurlDomains = []string{"screen.corp.example"}
 	b := newTestBridge(t, api, cfg)
 
@@ -327,116 +327,251 @@ func TestPublicURLModeUsesBaseURLNotLink(t *testing.T) {
 	ev.Links = []slackevents.SharedLinks{{Domain: "screen.corp.example", URL: link}}
 	b.HandleLinkShared(context.Background(), "T1", ev)
 
-	if api.uploadCount() != 0 {
-		t.Errorf("public_url mode should not upload, got %d uploads", api.uploadCount())
+	if atomic.LoadInt32(hits) != 1 {
+		t.Errorf("expected exactly one fetch from base_url, got %d", atomic.LoadInt32(hits))
 	}
-	if atomic.LoadInt32(hits) == 0 {
-		t.Error("public_url mode should fetch the metadata headers from base_url")
+	p := api.adds[0].params
+	if want := srv.URL + "/abcdef"; p.ExternalURL != want {
+		t.Errorf("external URL = %q, want the base_url page %q", p.ExternalURL, want)
 	}
-	blocks := unfurlBlocks(t, api, link) // unfurl is keyed by the posted link
-
-	img, ok := blocks[0].(*slack.ImageBlock)
-	if !ok {
-		t.Fatalf("first block should be the image, got %T", blocks[0])
+	if p.Title != "Login & checkout" {
+		t.Errorf("title = %q, want the decoded header %q", p.Title, "Login & checkout")
 	}
-	if want := srv.URL + "/abcdef.png"; img.ImageURL != want {
-		t.Errorf("image URL = %q, want base_url image %q", img.ImageURL, want)
+	if !strings.Contains(p.IndexableFileContents, "https://app.example/checkout") {
+		t.Errorf("indexable contents = %q, want it to carry the source URL", p.IndexableFileContents)
 	}
-	if img.Title == nil || img.Title.Text != "Login & checkout" {
-		t.Errorf("image title = %v, want decoded header %q", img.Title, "Login & checkout")
-	}
-	btns := buttonURLs(blocks)
-	if got := btns["open on "+mustParseHost(t, srv.URL)]; got != srv.URL+"/abcdef" {
-		t.Errorf("canonical button URL = %q, want base_url page %q", got, srv.URL+"/abcdef")
-	}
-	if got := btns["open the source url"]; got != "https://app.example/checkout" {
-		t.Errorf("source button URL = %q, want %q", got, "https://app.example/checkout")
+	if _, ok := api.unfurled[link]; !ok {
+		t.Errorf("unfurl should be keyed by the posted link; got %v", api.unfurled)
 	}
 }
 
-func TestUploadModeAddsTitleAndCanonicalButton(t *testing.T) {
-	// Upload mode reads the same metadata from the PNG fetch. With a title header
-	// but no source header, the unfurl gets a captioned image and a single
-	// "open on <host>" button derived from base_url.
-	srv, _ := pngServerWithMeta(t, testPNG(t, 10, 10), "Homepage", "")
+func TestRemoteFileTitleFallsBackToTheSourceURLThenTheID(t *testing.T) {
+	for _, tc := range []struct {
+		name, title, source, want string
+	}{
+		{"title wins", "Checkout page", "https://app.example/checkout", "Checkout page"},
+		{"source url when untitled", "", "https://app.example/checkout", "https://app.example/checkout"},
+		{"id when neither", "", "", "Screenshot abcdef"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := pngServerWithMeta(t, testPNG(t, 800, 600), tc.title, tc.source)
+			defer srv.Close()
+
+			api := &fakeAPI{}
+			b := newTestBridge(t, api, baseConfig(srv.URL))
+			b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+			if got := api.adds[0].params.Title; got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEachShareGetsItsOwnRemoteFile(t *testing.T) {
+	// A remote file records the channel, timestamp and author of every share it
+	// backs, and files.remote.add upserts, so one file per screenshot would both
+	// expose each share to viewers of the others and rewrite already-posted
+	// cards. Every share therefore registers its own file.
+	srv := pngServer(t, testPNG(t, 800, 600))
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
+	b := newTestBridge(t, api, baseConfig(srv.URL))
+
+	first := linkEvent()
+	b.HandleLinkShared(context.Background(), "T1", first)
+
+	elsewhere := linkEvent() // the same screenshot, another channel and message
+	elsewhere.Channel = "C2"
+	elsewhere.MessageTimeStamp = "1700000009.000500"
+	b.HandleLinkShared(context.Background(), "T1", elsewhere)
+
+	if len(api.adds) != 2 {
+		t.Fatalf("expected 2 files.remote.add, got %d", len(api.adds))
+	}
+	a, bID := api.adds[0].params.ExternalID, api.adds[1].params.ExternalID
+	if a == bID {
+		t.Errorf("both shares registered the same external ID %q", a)
+	}
+	for _, id := range []string{a, bID} {
+		if !strings.HasPrefix(id, "abcdef-") {
+			t.Errorf("external ID %q should be derived from the image ID", id)
+		}
+	}
+	// Both cards still link to the one screenshot page.
+	for i, add := range api.adds {
+		if want := srv.URL + "/abcdef"; add.params.ExternalURL != want {
+			t.Errorf("add %d external URL = %q, want %q", i, add.params.ExternalURL, want)
+		}
+	}
+}
+
+func TestRedeliveredEventReusesTheSameRemoteFile(t *testing.T) {
+	// Slack redelivers events and re-fires on an edited message; the ID is
+	// derived from the message so those refresh the card instead of piling up
+	// duplicate files.
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	api := &fakeAPI{}
+	b := newTestBridge(t, api, baseConfig(srv.URL))
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+	b.HandleLinkShared(context.Background(), "T1", linkEvent()) // same event again
+
+	if len(api.adds) != 2 {
+		t.Fatalf("expected 2 adds, got %d", len(api.adds))
+	}
+	if api.adds[0].params.ExternalID != api.adds[1].params.ExternalID {
+		t.Errorf("the same share used two external IDs: %q and %q",
+			api.adds[0].params.ExternalID, api.adds[1].params.ExternalID)
+	}
+}
+
+func TestPreviewTitleTruncatesLongTitles(t *testing.T) {
+	// The server does not cap stored titles, so the bridge must.
+	long := strings.Repeat("é", maxTitleLen+50) // multi-byte: truncation is by rune
+	got := previewTitle("abcdef", imageMeta{title: long})
+	if n := len([]rune(got)); n != maxTitleLen {
+		t.Errorf("truncated title has %d runes, want %d", n, maxTitleLen)
+	}
+	if !strings.HasPrefix(long, got) {
+		t.Error("truncated title should be a prefix of the original")
+	}
+}
+
+func TestPreviewIsEnlargedToSlacksMinimum(t *testing.T) {
+	// A screenshot below Slack's 300px floor would be rejected by
+	// files.remote.add, so the preview must come out at least that big.
+	srv := pngServer(t, testPNG(t, 40, 30))
+	defer srv.Close()
+
+	api := &fakeAPI{}
 	b := newTestBridge(t, api, baseConfig(srv.URL))
 	b.HandleLinkShared(context.Background(), "T1", linkEvent())
 
-	blocks := unfurlBlocks(t, api, "https://screen.corp.example/abcdef")
-	img := blocks[0].(*slack.ImageBlock)
-	if img.Title == nil || img.Title.Text != "Homepage" {
-		t.Errorf("image title = %v, want %q", img.Title, "Homepage")
+	if len(api.adds) != 1 {
+		t.Fatalf("expected 1 files.remote.add, got %d", len(api.adds))
 	}
-	btns := buttonURLs(blocks)
-	if len(btns) != 1 {
-		t.Fatalf("expected only the canonical button, got %v", btns)
-	}
-	if got := btns["open on "+mustParseHost(t, srv.URL)]; got != srv.URL+"/abcdef" {
-		t.Errorf("canonical button URL = %q, want base_url page %q", got, srv.URL+"/abcdef")
+	w, h := previewDims(t, api.adds[0].preview)
+	if w < imageproc.MinPreviewDim || h < imageproc.MinPreviewDim {
+		t.Errorf("preview is %dx%d, want at least %d on each side", w, h, imageproc.MinPreviewDim)
 	}
 }
 
-func TestUploadModeUploadsUnsharedAndSharesPublicly(t *testing.T) {
-	srv := pngServer(t, testPNG(t, 10, 10))
+func TestPreviewIsCappedAtMaxDimension(t *testing.T) {
+	srv := pngServer(t, testPNG(t, 4000, 2000))
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
-	b := newTestBridge(t, api, baseConfig(srv.URL))
-	b.HandleLinkShared(context.Background(), "T1", linkEvent())
-
-	if len(api.uploads) != 1 {
-		t.Fatalf("expected 1 unshared upload, got %d", len(api.uploads))
-	}
-	if api.uploads[0].Channel != "" {
-		t.Errorf("upload should be unshared (no channel), got %q", api.uploads[0].Channel)
-	}
-	if api.unfurls != 1 {
-		t.Errorf("expected 1 unfurl, got %d", api.unfurls)
-	}
-}
-
-func TestUnfurlFailureFallsBackToThreadedFilePost(t *testing.T) {
-	srv := pngServer(t, testPNG(t, 10, 10))
-	defer srv.Close()
-
-	// When the in-place unfurl fails, the bridge posts the screenshot as a file
-	// in the message's thread.
-	api := &fakeAPI{nextFileID: "F123", unfurlErr: io.ErrUnexpectedEOF}
-	b := newTestBridge(t, api, baseConfig(srv.URL))
-	b.HandleLinkShared(context.Background(), "T1", linkEvent())
-
-	// 1: the unshared upload for the (failed) unfurl; 2: the threaded file post.
-	if len(api.uploads) != 2 {
-		t.Fatalf("expected the unfurl upload plus a threaded fallback upload (2), got %d", len(api.uploads))
-	}
-	fallback := api.uploads[1]
-	if fallback.Channel != "C1" || fallback.ThreadTimestamp != "1700000000.000100" {
-		t.Errorf("fallback should post into C1's thread, got channel %q thread %q", fallback.Channel, fallback.ThreadTimestamp)
-	}
-}
-
-func TestNoneModePostsThreadedFileWithoutUnfurling(t *testing.T) {
-	srv := pngServer(t, testPNG(t, 10, 10))
-	defer srv.Close()
-
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
 	cfg := baseConfig(srv.URL)
-	cfg.ImageMode = config.ImageModeNone
+	cfg.MaxDimension = 1000
 	b := newTestBridge(t, api, cfg)
 	b.HandleLinkShared(context.Background(), "T1", linkEvent())
 
+	w, h := previewDims(t, api.adds[0].preview)
+	if w != 1000 || h != 500 {
+		t.Errorf("preview is %dx%d, want 1000x500 (capped, aspect preserved)", w, h)
+	}
+}
+
+func TestAddFailureLeavesTheLinkUnfurled(t *testing.T) {
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	// There is no fallback rendering: a Slack error on add means the link stays
+	// a plain URL, and nothing else is attempted.
+	api := &fakeAPI{addErr: io.ErrUnexpectedEOF}
+	b := newTestBridge(t, api, baseConfig(srv.URL))
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	if api.addCount() != 1 {
+		t.Errorf("expected the single failed add, got %d", api.addCount())
+	}
 	if api.unfurls != 0 {
-		t.Errorf("none mode should not unfurl, got %d unfurls", api.unfurls)
+		t.Errorf("expected no unfurl after a failed add, got %d", api.unfurls)
 	}
-	if len(api.uploads) != 1 {
-		t.Fatalf("expected exactly the threaded file upload (1), got %d", len(api.uploads))
+}
+
+func TestWaitsForTheRichPreviewBeforeUnfurling(t *testing.T) {
+	// Slack parses the preview asynchronously; unfurling before it is ready
+	// leaves the card blank for far longer, so the bridge polls first.
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	api := &fakeAPI{richAfter: 2} // ready on the third files.remote.info
+	cfg := baseConfig(srv.URL)
+	cfg.PreviewWait = config.TOMLDuration{Duration: 5 * time.Second}
+	b := newTestBridge(t, api, cfg)
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	if api.infoCount() != 3 {
+		t.Errorf("expected polling to stop at the third info call, got %d", api.infoCount())
 	}
-	up := api.uploads[0]
-	if up.Channel != "C1" || up.ThreadTimestamp != "1700000000.000100" {
-		t.Errorf("none mode should post into C1's thread, got channel %q thread %q", up.Channel, up.ThreadTimestamp)
+	if api.unfurls != 1 {
+		t.Errorf("expected the unfurl after the preview became ready, got %d", api.unfurls)
+	}
+}
+
+func TestPreviewWaitIsSharedAcrossTheMessagesLinks(t *testing.T) {
+	// Every screenshot is registered before any waiting starts, so Slack parses
+	// the previews concurrently and the message costs one wait, not one per link.
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	api := &fakeAPI{}
+	cfg := baseConfig(srv.URL)
+	cfg.PreviewWait = config.TOMLDuration{Duration: 5 * time.Second}
+	b := newTestBridge(t, api, cfg)
+
+	ev := linkEvent()
+	ev.Links = nil
+	for _, id := range []string{"aaaa", "bbbb", "cccc"} {
+		ev.Links = append(ev.Links, slackevents.SharedLinks{
+			Domain: "screen.corp.example",
+			URL:    "https://screen.corp.example/" + id,
+		})
+	}
+	// The previews report ready on the first poll, so a shared wait needs one
+	// info call per file; a per-link wait would interleave adds and polls.
+	b.HandleLinkShared(context.Background(), "T1", ev)
+
+	if len(api.adds) != 3 || api.unfurls != 3 {
+		t.Fatalf("expected 3 adds and 3 unfurls, got %d and %d", len(api.adds), api.unfurls)
+	}
+	if got := api.firstPollAfter; got != 3 {
+		t.Errorf("waiting began after %d adds, want all 3 registered first", got)
+	}
+}
+
+func TestUnfurlsAnywayWhenThePreviewNeverBecomesReady(t *testing.T) {
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	api := &fakeAPI{richAfter: 1 << 30} // never ready
+	cfg := baseConfig(srv.URL)
+	cfg.PreviewWait = config.TOMLDuration{Duration: 300 * time.Millisecond}
+	b := newTestBridge(t, api, cfg)
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	if api.unfurls != 1 {
+		t.Errorf("expected the unfurl to proceed after preview_wait elapsed, got %d", api.unfurls)
+	}
+}
+
+func TestSkipsThePreviewWaitWhenDisabled(t *testing.T) {
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	api := &fakeAPI{richAfter: 1 << 30}
+	b := newTestBridge(t, api, baseConfig(srv.URL)) // preview_wait = 0
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	if api.infoCount() != 0 {
+		t.Errorf("preview_wait = 0 should not poll, got %d info calls", api.infoCount())
+	}
+	if api.unfurls != 1 {
+		t.Errorf("expected 1 unfurl, got %d", api.unfurls)
 	}
 }
 
@@ -446,14 +581,14 @@ func TestRenderSkipsMissingImage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
 	b := newTestBridge(t, api, baseConfig(srv.URL))
 	ev := linkEvent()
 	ev.Links[0].URL = "https://screen.corp.example/missing"
 	b.HandleLinkShared(context.Background(), "T1", ev)
 
-	if api.uploadCount() != 0 || api.unfurls != 0 {
-		t.Errorf("expected no Slack calls for missing image, got %d uploads %d unfurls", api.uploadCount(), api.unfurls)
+	if api.addCount() != 0 || api.unfurls != 0 {
+		t.Errorf("expected no Slack calls for missing image, got %d uploads %d unfurls", api.addCount(), api.unfurls)
 	}
 }
 
@@ -464,12 +599,12 @@ func TestRenderRejectsNonImageContentType(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
 	b := newTestBridge(t, api, baseConfig(srv.URL))
 	b.HandleLinkShared(context.Background(), "T1", linkEvent())
 
-	if api.uploadCount() != 0 {
-		t.Errorf("expected no upload for non-image content-type, got %d", api.uploadCount())
+	if api.addCount() != 0 {
+		t.Errorf("expected no upload for non-image content-type, got %d", api.addCount())
 	}
 }
 
@@ -487,15 +622,15 @@ func TestRenderDoesNotFollowRedirects(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
 	b := newTestBridge(t, api, baseConfig(srv.URL))
 	b.HandleLinkShared(context.Background(), "T1", linkEvent())
 
 	if hitTarget {
 		t.Error("redirect was followed; the bridge should refuse redirects")
 	}
-	if api.uploadCount() != 0 {
-		t.Errorf("expected no upload after a refused redirect, got %d", api.uploadCount())
+	if api.addCount() != 0 {
+		t.Errorf("expected no upload after a refused redirect, got %d", api.addCount())
 	}
 }
 
@@ -505,8 +640,8 @@ func TestHandleLinkSharedSkipsComposePreview(t *testing.T) {
 	ev := linkEvent()
 	ev.MessageTimeStamp = "a1b2c3d4-e5f6-7890-abcd-ef1234567890" // UUID: compose area
 	b.HandleLinkShared(context.Background(), "T1", ev)
-	if api.uploadCount() != 0 || api.unfurls != 0 {
-		t.Errorf("compose-area preview should be skipped, got %d uploads %d unfurls", api.uploadCount(), api.unfurls)
+	if api.addCount() != 0 || api.unfurls != 0 {
+		t.Errorf("compose-area preview should be skipped, got %d uploads %d unfurls", api.addCount(), api.unfurls)
 	}
 }
 
@@ -514,7 +649,7 @@ func TestHandleLinkSharedCapsLinksPerMessage(t *testing.T) {
 	srv := pngServer(t, testPNG(t, 10, 10))
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
 	cfg := baseConfig(srv.URL)
 	cfg.MaxLinksPerMessage = 2
 	b := newTestBridge(t, api, cfg)
@@ -530,8 +665,8 @@ func TestHandleLinkSharedCapsLinksPerMessage(t *testing.T) {
 	b.HandleLinkShared(context.Background(), "T1", ev)
 
 	// Two rendered links (cap=2): two uploads and two per-link unfurl calls.
-	if api.uploadCount() != 2 {
-		t.Errorf("expected 2 uploads (cap=2), got %d", api.uploadCount())
+	if api.addCount() != 2 {
+		t.Errorf("expected 2 uploads (cap=2), got %d", api.addCount())
 	}
 	if api.unfurls != 2 {
 		t.Errorf("expected 2 per-link unfurl calls, got %d", api.unfurls)
@@ -545,7 +680,7 @@ func TestHandleLinkSharedUnfurlsEachLink(t *testing.T) {
 	srv := pngServer(t, testPNG(t, 10, 10))
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123"}
+	api := &fakeAPI{}
 	b := newTestBridge(t, api, baseConfig(srv.URL))
 
 	ev := linkEvent()
@@ -574,7 +709,7 @@ func TestHandleLinkSharedDropsAtCapacity(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	api := &fakeAPI{nextFileID: "F123", uploadHook: func() {
+	api := &fakeAPI{addHook: func() {
 		once.Do(func() { close(started) })
 		<-release
 	}}
@@ -597,8 +732,8 @@ func TestHandleLinkSharedDropsAtCapacity(t *testing.T) {
 	close(release)
 	<-done
 
-	if api.uploadCount() != 1 {
-		t.Errorf("expected only the first event to upload (1), got %d; the second should have been dropped", api.uploadCount())
+	if api.addCount() != 1 {
+		t.Errorf("expected only the first event to upload (1), got %d; the second should have been dropped", api.addCount())
 	}
 }
 
@@ -607,7 +742,6 @@ func TestAuthzBlocksExternalUsers(t *testing.T) {
 	defer srv.Close()
 
 	api := &fakeAPI{
-		nextFileID: "F123",
 		users: map[string]*slack.User{
 			"Uguest":  {ID: "Uguest", TeamID: "T1", IsRestricted: true},
 			"Uextern": {ID: "Uextern", TeamID: "T2"},
@@ -619,19 +753,19 @@ func TestAuthzBlocksExternalUsers(t *testing.T) {
 	b := newTestBridge(t, api, cfg)
 
 	for _, tc := range []struct {
-		user        string
-		wantUploads int
+		user     string
+		wantAdds int
 	}{
 		{"Uguest", 0},
 		{"Uextern", 0},
 		{"Uok", 1},
 	} {
-		api.uploads = nil
+		api.adds = nil
 		ev := linkEvent()
 		ev.User = tc.user
 		b.HandleLinkShared(context.Background(), "T1", ev)
-		if api.uploadCount() != tc.wantUploads {
-			t.Errorf("user %q: expected %d uploads, got %d", tc.user, tc.wantUploads, api.uploadCount())
+		if api.addCount() != tc.wantAdds {
+			t.Errorf("user %q: expected %d uploads, got %d", tc.user, tc.wantAdds, api.addCount())
 		}
 	}
 }
@@ -642,10 +776,7 @@ func TestAuthzFailsClosedOnEmptyTeamID(t *testing.T) {
 
 	// A user who would be internal in workspace T1, but the event carries no
 	// team ID, so the bridge cannot confirm membership and must deny.
-	api := &fakeAPI{
-		nextFileID: "F123",
-		users:      map[string]*slack.User{"Uok": {ID: "Uok", TeamID: "T1"}},
-	}
+	api := &fakeAPI{users: map[string]*slack.User{"Uok": {ID: "Uok", TeamID: "T1"}}}
 	cfg := baseConfig(srv.URL)
 	cfg.BlockExternalUsers = true
 	b := newTestBridge(t, api, cfg)
@@ -653,8 +784,8 @@ func TestAuthzFailsClosedOnEmptyTeamID(t *testing.T) {
 	ev := linkEvent()
 	ev.User = "Uok"
 	b.HandleLinkShared(context.Background(), "", ev) // empty teamID
-	if api.uploadCount() != 0 {
-		t.Errorf("expected fail-closed (no uploads) when team ID is empty, got %d", api.uploadCount())
+	if api.addCount() != 0 {
+		t.Errorf("expected fail-closed (no uploads) when team ID is empty, got %d", api.addCount())
 	}
 }
 
@@ -662,27 +793,24 @@ func TestAuthzRestrictsToAllowedGroups(t *testing.T) {
 	srv := pngServer(t, testPNG(t, 10, 10))
 	defer srv.Close()
 
-	api := &fakeAPI{
-		nextFileID:   "F123",
-		groupMembers: map[string][]string{"S1": {"Umember"}},
-	}
+	api := &fakeAPI{groupMembers: map[string][]string{"S1": {"Umember"}}}
 	cfg := baseConfig(srv.URL)
 	cfg.AllowedUserGroups = []string{"S1"}
 	b := newTestBridge(t, api, cfg)
 
 	for _, tc := range []struct {
-		user        string
-		wantUploads int
+		user     string
+		wantAdds int
 	}{
 		{"Umember", 1},
 		{"Ustranger", 0},
 	} {
-		api.uploads = nil
+		api.adds = nil
 		ev := linkEvent()
 		ev.User = tc.user
 		b.HandleLinkShared(context.Background(), "T1", ev)
-		if api.uploadCount() != tc.wantUploads {
-			t.Errorf("user %q: expected %d uploads, got %d", tc.user, tc.wantUploads, api.uploadCount())
+		if api.addCount() != tc.wantAdds {
+			t.Errorf("user %q: expected %d uploads, got %d", tc.user, tc.wantAdds, api.addCount())
 		}
 	}
 }
@@ -691,13 +819,13 @@ func TestAuthzFailsClosedOnAPIError(t *testing.T) {
 	srv := pngServer(t, testPNG(t, 10, 10))
 	defer srv.Close()
 
-	api := &fakeAPI{nextFileID: "F123", userErr: io.ErrUnexpectedEOF}
+	api := &fakeAPI{userErr: io.ErrUnexpectedEOF}
 	cfg := baseConfig(srv.URL)
 	cfg.BlockExternalUsers = true
 	b := newTestBridge(t, api, cfg)
 
 	b.HandleLinkShared(context.Background(), "T1", linkEvent())
-	if api.uploadCount() != 0 {
-		t.Errorf("expected no uploads when user lookup fails (fail closed), got %d", api.uploadCount())
+	if api.addCount() != 0 {
+		t.Errorf("expected no uploads when user lookup fails (fail closed), got %d", api.addCount())
 	}
 }

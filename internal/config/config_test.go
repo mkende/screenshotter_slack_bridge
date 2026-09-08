@@ -50,38 +50,57 @@ request_timeout = "10s"
 	if cfg.MaxImageWorkers != 4 {
 		t.Errorf("default max_image_workers should be 4, got %d", cfg.MaxImageWorkers)
 	}
-	if cfg.MaxLinksPerMessage != 4 {
-		t.Errorf("default max_links_per_message should be 4, got %d", cfg.MaxLinksPerMessage)
+	if cfg.MaxLinksPerMessage != 5 {
+		t.Errorf("default max_links_per_message should be 5, got %d", cfg.MaxLinksPerMessage)
 	}
-	if cfg.ImageMode != ImageModeUpload {
-		t.Errorf("default image_mode should be %q, got %q", ImageModeUpload, cfg.ImageMode)
+	if cfg.MaxDimension != 1600 {
+		t.Errorf("max_dimension not parsed: %d", cfg.MaxDimension)
 	}
 }
 
-func TestLoadRejectsUnknownImageMode(t *testing.T) {
+func TestLoadDefaults(t *testing.T) {
 	p := writeConfig(t, `
 screenshotter_base_url = "http://internal:8080"
 unfurl_domains = ["screen.example"]
 bot_token = "xoxb-bot"
 app_token = "xapp-app"
-image_mode = "magic"
 `)
-	if _, err := Load(p); err == nil {
-		t.Error("expected error for unknown image_mode")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxDimension != 1600 {
+		t.Errorf("default max_dimension should be 1600, got %d", cfg.MaxDimension)
+	}
+	if cfg.PreviewWait.Duration != 8*time.Second {
+		t.Errorf("default preview_wait should be 8s, got %v", cfg.PreviewWait.Duration)
 	}
 }
 
-func TestLoadPublicURLModeRequiresBaseURL(t *testing.T) {
-	// base_url is the canonical image source in public_url mode too, so it is
-	// required there as well.
+func TestLoadRejectsMaxDimensionBelowSlacksMinimum(t *testing.T) {
+	// A cap under the smallest preview side Slack accepts cannot be honoured.
 	p := writeConfig(t, `
+screenshotter_base_url = "http://internal:8080"
 unfurl_domains = ["screen.example"]
 bot_token = "xoxb-bot"
 app_token = "xapp-app"
-image_mode = "public_url"
+max_dimension = 200
 `)
 	if _, err := Load(p); err == nil {
-		t.Error("expected error: screenshotter_base_url is required in public_url mode")
+		t.Error("expected an error for max_dimension below the Slack preview minimum")
+	}
+}
+
+func TestLoadAcceptsMaxDimensionZero(t *testing.T) {
+	p := writeConfig(t, `
+screenshotter_base_url = "http://internal:8080"
+unfurl_domains = ["screen.example"]
+bot_token = "xoxb-bot"
+app_token = "xapp-app"
+max_dimension = 0
+`)
+	if _, err := Load(p); err != nil {
+		t.Errorf("max_dimension = 0 disables the cap and must be accepted: %v", err)
 	}
 }
 

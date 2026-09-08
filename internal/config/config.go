@@ -10,41 +10,18 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-)
 
-// Image modes for ImageMode, selecting how the screenshot is supplied to Slack.
-const (
-	// ImageModeUpload fetches the PNG over the (possibly private) network,
-	// uploads it to Slack, and makes it public via files.sharedPublicURL so the
-	// unfurl can reference it by URL. Works even when the screenshotter server is
-	// not reachable from the internet.
-	ImageModeUpload = "upload"
-	// ImageModePublicURL references the screenshot directly by its public URL,
-	// derived from the shared link, without downloading or uploading anything.
-	// Requires the screenshotter server to be reachable by Slack.
-	ImageModePublicURL = "public_url"
-	// ImageModeNone does not unfurl in place at all: the bridge posts the
-	// screenshot as a threaded file reply (kept workspace-private, never made
-	// public). Requires the bot to be a member of the channel.
-	ImageModeNone = "none"
+	"github.com/mkende/screenshotter_slack_bridge/internal/imageproc"
 )
 
 // Config holds the bridge's runtime configuration.
 type Config struct {
-	// ImageMode selects how the screenshot is shown, one of ImageModeUpload
-	// (default), ImageModePublicURL, or ImageModeNone. See those constants for the
-	// trade-offs. The unfurl modes (upload, public_url) fall back to a threaded
-	// file post when the in-place unfurl can't be produced; ImageModeNone always
-	// posts the threaded file reply.
-	ImageMode string `toml:"image_mode"`
-
 	// ScreenshotterBaseURL is the canonical base URL of the screenshotter server
-	// (no trailing slash). It is the single source of truth for the image and the
-	// "open on <host>" button; the posted link only supplies the image ID. In
-	// ImageModeUpload the bridge fetches the PNG from here (it may be a private
-	// address, e.g. "http://screenshotter.internal:8080"). In ImageModePublicURL
-	// Slack loads the image from here directly, so it must be reachable by Slack
-	// (e.g. "https://screen.corp.example"). Required in both modes.
+	// (no trailing slash); the posted link only supplies the image ID. The bridge
+	// fetches the PNG from here and uses it as the remote file's external URL —
+	// the address people land on when they click the card — so it may be, and is
+	// meant to be, a private address (e.g. "http://screenshotter.internal:8080"):
+	// only Slack members who can reach it get the full screenshot. Required.
 	ScreenshotterBaseURL string `toml:"screenshotter_base_url"`
 
 	// UnfurlDomains is the list of hostnames that, when seen in a Slack message,
@@ -66,15 +43,25 @@ type Config struct {
 	// token. When set and non-empty, it takes precedence over AppToken.
 	AppTokenEnvVar string `toml:"app_token_env_var"`
 
-	// MaxDimension caps the largest side (width or height) of an uploaded
-	// image, in pixels. Images larger than this are downscaled before upload,
-	// preserving aspect ratio. 0 (the default) disables resizing and uploads
-	// the full-resolution PNG.
+	// MaxDimension caps the largest side (width or height), in pixels, of the
+	// preview image sent to Slack; larger screenshots are downscaled to it,
+	// preserving aspect ratio. The card links through to the full-resolution
+	// image on the server, so the preview does not need to be pixel-exact.
+	// 0 disables the cap. Must be 0 or at least 300, the smallest side Slack
+	// accepts. Default: 1600.
 	MaxDimension int `toml:"max_dimension"`
+
+	// PreviewWait bounds how long the bridge waits for Slack to finish parsing
+	// the preview image (files.remote.add returns before it is ready) before
+	// unfurling anyway. Unfurling too early still works — Slack fills the card
+	// in on its own — but the screenshot then takes noticeably longer to appear
+	// (~12s observed, against ~3s when the unfurl waits). 0 unfurls immediately.
+	// Default: 8s.
+	PreviewWait TOMLDuration `toml:"preview_wait"`
 
 	// RequestTimeout bounds each outbound request the bridge makes — both
 	// fetching an image from the screenshotter server and the Slack API calls
-	// (upload, unfurl, user/usergroup lookups). Default: 30s.
+	// (remote file add/info, unfurl, user/usergroup lookups). Default: 30s.
 	RequestTimeout TOMLDuration `toml:"request_timeout"`
 
 	// MaxConcurrency caps how many link_shared events the bridge handles in
@@ -83,14 +70,15 @@ type Config struct {
 	// pile up unbounded under a flood. Default: 50.
 	MaxConcurrency int `toml:"max_concurrency"`
 
-	// MaxImageWorkers caps how many images are decoded/resized in parallel.
+	// MaxImageWorkers caps how many images are decoded/rescaled in parallel.
 	// Image conversion is the memory-heavy step (a decoded image can be far
 	// larger than its PNG), so it is bounded separately from, and more tightly
 	// than, MaxConcurrency. Default: 4.
 	MaxImageWorkers int `toml:"max_image_workers"`
 
 	// MaxLinksPerMessage caps how many screenshot links the bridge renders from
-	// a single Slack message, limiting amplification from one post. Default: 4.
+	// a single Slack message, limiting amplification from one post. Slack itself
+	// unfurls at most 5 links per message. Default: 5.
 	MaxLinksPerMessage int `toml:"max_links_per_message"`
 
 	// BlockExternalUsers, when true, makes the bridge ignore link_shared events
@@ -132,11 +120,12 @@ func (d *TOMLDuration) UnmarshalText(b []byte) error {
 // Load reads, decodes, and validates the configuration at path.
 func Load(path string) (*Config, error) {
 	c := &Config{
-		ImageMode:          ImageModeUpload,
+		MaxDimension:       1600,
+		PreviewWait:        TOMLDuration{8 * time.Second},
 		RequestTimeout:     TOMLDuration{30 * time.Second},
 		MaxConcurrency:     50,
 		MaxImageWorkers:    4,
-		MaxLinksPerMessage: 4,
+		MaxLinksPerMessage: 5,
 	}
 
 	meta, err := toml.DecodeFile(path, c)
@@ -167,14 +156,6 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	switch c.ImageMode {
-	case ImageModeUpload, ImageModePublicURL, ImageModeNone:
-	default:
-		return fmt.Errorf("image_mode must be one of %q, %q, %q", ImageModeUpload, ImageModePublicURL, ImageModeNone)
-	}
-
-	// base_url is the canonical server URL for both modes (the image source and
-	// the button target), so it is always required.
 	if c.ScreenshotterBaseURL == "" {
 		return fmt.Errorf("screenshotter_base_url is required")
 	}
@@ -203,8 +184,11 @@ func (c *Config) validate() error {
 	if !strings.HasPrefix(c.AppToken, "xapp-") {
 		return fmt.Errorf("app_token must be a Socket Mode app-level token starting with \"xapp-\"")
 	}
-	if c.MaxDimension < 0 {
-		return fmt.Errorf("max_dimension must not be negative")
+	if c.MaxDimension != 0 && c.MaxDimension < imageproc.MinPreviewDim {
+		return fmt.Errorf("max_dimension must be 0 or at least %d, the smallest preview side Slack accepts", imageproc.MinPreviewDim)
+	}
+	if c.PreviewWait.Duration < 0 {
+		return fmt.Errorf("preview_wait must not be negative")
 	}
 	if c.RequestTimeout.Duration <= 0 {
 		return fmt.Errorf("request_timeout must be positive")

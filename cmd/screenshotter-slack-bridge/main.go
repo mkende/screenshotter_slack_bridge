@@ -1,7 +1,7 @@
 // Command screenshotter-slack-bridge connects to Slack over Socket Mode and
-// renders screenshotter links (screen/{id}) into inline image unfurls, fetching
-// the images from a screenshotter server that need not be reachable from the
-// public internet.
+// renders screenshotter links (screen/{id}) as Slack remote files, so each link
+// unfurls into a card showing the screenshot. The images are fetched from a
+// screenshotter server that need not be reachable from the public internet.
 package main
 
 import (
@@ -70,18 +70,11 @@ func main() {
 					sm.Ack(*evt.Request)
 				}
 				handleEventsAPI(ctx, b, logger, eventsAPI)
-			case socketmode.EventTypeInteractive:
-				// The unfurl's link buttons are url buttons: Slack opens the URL
-				// client-side and still sends a block_actions payload we must
-				// acknowledge. There is nothing for us to do beyond the ack.
-				if evt.Request != nil {
-					sm.Ack(*evt.Request)
-				}
 			}
 		}
 	}()
 
-	logger.Printf("screenshotter slack bridge %s starting (image_mode: %s, unfurl domains: %v)", version.Version, cfg.ImageMode, cfg.UnfurlDomains)
+	logger.Printf("screenshotter slack bridge %s starting (unfurl domains: %v)", version.Version, cfg.UnfurlDomains)
 	// RunContext only returns once a reconnection has failed, so today it never
 	// returns nil and staticcheck flags the check as always true. Keep testing
 	// err: a nil-on-clean-exit return is within its documented contract.

@@ -1,6 +1,8 @@
 // Package bridge contains the core logic that turns a Slack link_shared event
-// for a screenshotter link into an inline image unfurl (falling back to a
-// threaded file upload when an inline unfurl is not possible).
+// for a screenshotter link into an inline unfurl backed by a Slack remote file:
+// the screenshot is registered with files.remote.add, whose preview Slack stores
+// workspace-privately, and the link is replaced by a card pointing back at the
+// (possibly private) screenshotter page.
 package bridge
 
 import (
@@ -30,6 +32,16 @@ const maxImageBytes = 64 << 20 // 64 MiB
 // errNotFound is returned when the screenshotter server has no such image.
 var errNotFound = errors.New("image not found")
 
+// maxTitleLen bounds the title sent to Slack, in runes. The server does not cap
+// the title it stores, and while files.remote.add accepted 4000 characters in
+// testing it documents a bad_title error for overlong titles; a card shows one
+// line anyway.
+const maxTitleLen = 250
+
+// previewPollInterval is how often files.remote.info is polled while waiting for
+// Slack to finish parsing the preview image. Parsing took ~1.7-2.1s in testing.
+const previewPollInterval = 250 * time.Millisecond
+
 // idPattern matches the random alphanumeric image IDs the server generates.
 // Keeping IDs strictly alphanumeric also prevents path traversal or injection
 // into the fetch URL.
@@ -53,8 +65,8 @@ var defaultReservedPaths = []string{
 
 // slackAPI is the subset of the Slack client the bridge uses.
 type slackAPI interface {
-	UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
-	ShareFilePublicURLContext(ctx context.Context, fileID string) (*slack.File, []slack.Comment, *slack.Paging, error)
+	AddRemoteFileContext(ctx context.Context, params slack.RemoteFileParameters) (*slack.RemoteFile, error)
+	GetRemoteFileInfoContext(ctx context.Context, externalID, fileID string) (*slack.RemoteFile, error)
 	UnfurlMessageContext(ctx context.Context, channelID, timestamp string, unfurls map[string]slack.Attachment, options ...slack.MsgOption) (string, string, string, error)
 	GetUserInfoContext(ctx context.Context, user string) (*slack.User, error)
 	GetUserGroupMembersContext(ctx context.Context, userGroup string, options ...slack.GetUserGroupMembersOption) ([]string, error)
@@ -161,166 +173,205 @@ func (b *Bridge) HandleLinkShared(ctx context.Context, teamID string, ev *slacke
 		return
 	}
 
-	// Unfurl each link in its own chat.unfurl call. Slack accumulates unfurls per
-	// URL across calls, so independent calls let every good link render even if
-	// another link in the same message fails.
-	rendered := 0
+	// Register every screenshot first, then wait for Slack to parse the previews,
+	// then unfurl. Slack parses previews concurrently, so one wait covers the
+	// whole message instead of one wait per link.
+	var shares []pendingShare
+	attempted := 0
 	for _, link := range ev.Links {
 		id, ok := b.extractID(link)
 		if !ok {
 			continue
 		}
-		if rendered >= b.cfg.MaxLinksPerMessage {
+		if attempted >= b.cfg.MaxLinksPerMessage {
 			b.log.Printf("link cap (%d) reached for message %q; skipping remaining links",
 				b.cfg.MaxLinksPerMessage, ev.MessageTimeStamp)
 			break
 		}
-		rendered++
-		if err := b.render(ctx, ev, link.URL, id); err != nil {
+		attempted++
+		extID, err := b.registerShare(ctx, ev, id)
+		if err != nil {
 			if errors.Is(err, errNotFound) {
 				b.log.Printf("image %q not found, skipping", id)
 				continue
 			}
-			b.log.Printf("rendering %q failed: %v", id, err)
+			b.log.Printf("registering %q failed: %v", id, err)
+			continue
+		}
+		shares = append(shares, pendingShare{link: link.URL, id: id, extID: extID})
+	}
+	if len(shares) == 0 {
+		return
+	}
+
+	b.waitForPreviews(ctx, shares)
+
+	// Unfurl each link in its own chat.unfurl call. Slack accumulates unfurls per
+	// URL across calls, so independent calls let every good link render even if
+	// another link in the same message fails.
+	for _, sh := range shares {
+		if err := b.unfurlShare(ctx, ev, sh); err != nil {
+			b.log.Printf("unfurling %q failed: %v", sh.id, err)
 		}
 	}
 }
 
-// render resolves a public image URL for the link's id — per the configured
-// image mode — and unfurls the link in place with the screenshot image, its
-// title, and the link buttons. The memory-heavy image conversion (upload mode
-// only) is bounded by resize.
-func (b *Bridge) render(ctx context.Context, ev *slackevents.LinkSharedEvent, link, id string) error {
-	alt := "Screenshot " + id
-
-	// image_mode "none" never unfurls in place — it only posts the threaded file
-	// reply.
-	if b.cfg.ImageMode == config.ImageModeNone {
-		return b.postImageReply(ctx, ev, id, alt)
-	}
-
-	// Try the in-place unfurl; on any failure other than a vanished image, fall
-	// back to posting the screenshot as a threaded file reply.
-	if err := b.unfurlInPlace(ctx, ev, link, id, alt); err != nil {
-		if errors.Is(err, errNotFound) {
-			return err
-		}
-		b.log.Printf("in-place unfurl for %q failed (%v); falling back to a threaded file post", id, err)
-		return b.postImageReply(ctx, ev, id, alt)
-	}
-	return nil
+// pendingShare is a screenshot registered with Slack and awaiting its unfurl.
+type pendingShare struct {
+	link  string // the URL as posted, which keys the unfurl
+	id    string // the image ID, for logging
+	extID string // the remote file registered for this share
 }
 
-// unfurlInPlace renders the link in place with the screenshot image, per the
-// configured image mode. The image, metadata, and buttons all come from
-// screenshotter_base_url, the canonical server URL — not the posted link's host.
-// The link only carries the ID, so any registered domain (even a bare
-// single-label host) resolves to the same Slack-loadable image.
-func (b *Bridge) unfurlInPlace(ctx context.Context, ev *slackevents.LinkSharedEvent, link, id, alt string) error {
-	imageURL := b.imageFileURL(id)
-
-	var meta imageMeta
-	var err error
-	if b.cfg.ImageMode == config.ImageModePublicURL {
-		// Slack loads the bytes from imageURL itself; we only fetch the metadata
-		// headers. A fetch failure (other than a vanished image) is non-fatal —
-		// we still unfurl the image, just without the title/source extras.
-		meta, err = b.fetchMeta(ctx, imageURL)
-		if errors.Is(err, errNotFound) {
-			return err
-		} else if err != nil {
-			b.log.Printf("metadata fetch for %q failed (%v); unfurling without title/source", id, err)
-		}
-	} else {
-		// Upload mode: fetch from base_url, upload to Slack, and point the image
-		// block at the Slack-hosted public URL instead.
-		imageURL, meta, err = b.uploadPublicImage(ctx, id, alt)
-		if err != nil {
-			return err
-		}
-	}
-
-	blocks := previewBlocks(b.cfg.ScreenshotterBaseURL, id, imageURL, alt, meta)
-	unfurls := map[string]slack.Attachment{link: {Blocks: slack.Blocks{BlockSet: blocks}}}
-	if uerr := b.unfurl(ctx, ev.Channel, ev.MessageTimeStamp, unfurls); uerr != nil {
-		return fmt.Errorf("unfurl: %s", slackErr(uerr))
-	}
-	return nil
-}
-
-// postImageReply posts the screenshot as a file in the message's thread. The
-// file stays workspace-private (it is never made public), but the bot must be a
-// member of the channel. Used as image_mode "none" and as the fallback when an
-// in-place unfurl fails.
-func (b *Bridge) postImageReply(ctx context.Context, ev *slackevents.LinkSharedEvent, id, alt string) error {
-	data, _, err := b.fetchPNG(ctx, id)
+// registerShare fetches the screenshot and registers this share of it as a
+// remote file, returning the external ID it was registered under. The
+// memory-heavy image conversion is bounded by preparePreview.
+func (b *Bridge) registerShare(ctx context.Context, ev *slackevents.LinkSharedEvent, id string) (string, error) {
+	data, meta, err := b.fetchPNG(ctx, id)
 	if err != nil {
-		return err // may be errNotFound; let the caller classify it
+		return "", err // may be errNotFound; let the caller classify it
 	}
-	data, err = b.resize(ctx, data)
+	preview, err := b.preparePreview(ctx, data)
 	if err != nil {
-		return fmt.Errorf("resize: %w", err)
+		return "", fmt.Errorf("prepare preview: %w", err)
 	}
 
-	threadTS := ev.ThreadTimeStamp
-	if threadTS == "" {
-		threadTS = ev.MessageTimeStamp
+	extID := shareExternalID(id, ev)
+	if err := b.addRemoteFile(ctx, extID, id, preview, meta); err != nil {
+		return "", fmt.Errorf("files.remote.add: %s", slackErr(err))
 	}
-	filename := id + ".png"
-	if _, err := b.uploadFile(ctx, slack.UploadFileParameters{
-		Filename:        filename,
-		Title:           filename,
-		FileSize:        len(data),
-		Reader:          bytes.NewReader(data),
-		AltTxt:          alt,
-		Channel:         ev.Channel,
-		ThreadTimestamp: threadTS,
-	}); err != nil {
-		return fmt.Errorf("threaded file post: %s", slackErr(err))
+	return extID, nil
+}
+
+// unfurlShare replaces the posted link with a card for its remote file.
+func (b *Bridge) unfurlShare(ctx context.Context, ev *slackevents.LinkSharedEvent, sh pendingShare) error {
+	// A file block must be the only block in the unfurl, so the title and the
+	// click-through both come from the remote file itself. HideColor drops the
+	// coloured bar down the card's left edge, which Slack allows only for a
+	// lone file block.
+	unfurls := map[string]slack.Attachment{
+		sh.link: {
+			HideColor: true,
+			Blocks:    slack.Blocks{BlockSet: []slack.Block{slack.NewFileBlock("", sh.extID, "remote")}},
+		},
+	}
+	if err := b.unfurl(ctx, ev.Channel, ev.MessageTimeStamp, unfurls); err != nil {
+		return fmt.Errorf("unfurl: %s", slackErr(err))
 	}
 	return nil
 }
 
-// imageFileURL is the canonical PNG URL on the screenshotter server: the address
-// the bridge fetches in upload mode and that Slack loads directly in public_url
-// mode. base_url is validated and trailing-slash-trimmed by config.
+// shareExternalID returns the external_id registering one share of image id.
+// It is unique per (screenshot, message) rather than per screenshot, because a
+// remote file accumulates the channel, timestamp and author of every share it
+// backs: reusing one file across shares would expose each share to viewers of
+// all the others, and — since files.remote.add upserts — would rewrite the
+// preview and title of cards already posted elsewhere. Deriving it from the
+// message rather than at random keeps the add idempotent, so a redelivered
+// event or an edited message refreshes its own card instead of leaking a
+// duplicate file.
+func shareExternalID(id string, ev *slackevents.LinkSharedEvent) string {
+	return id + "-" + ev.Channel + "-" + ev.MessageTimeStamp
+}
+
+// addRemoteFile registers this share of the screenshot as a remote file under
+// externalID. imageID identifies the screenshot itself: it names the preview
+// upload, builds the external URL — the screenshot's page on the canonical
+// server, where the card's click-through leads — and is the last-resort title.
+func (b *Bridge) addRemoteFile(ctx context.Context, externalID, imageID string, preview []byte, meta imageMeta) error {
+	actx, cancel := context.WithTimeout(ctx, b.cfg.RequestTimeout.Duration)
+	defer cancel()
+	_, err := b.api.AddRemoteFileContext(actx, slack.RemoteFileParameters{
+		ExternalID:  externalID,
+		ExternalURL: b.pageURL(imageID),
+		Title:       previewTitle(imageID, meta),
+		Filetype:    "png",
+		// The card has no room for the source URL, so it is stored as the file's
+		// indexable contents instead of being dropped.
+		IndexableFileContents: strings.TrimSpace(meta.title + " " + meta.sourceURL),
+		PreviewImageReader:    bytes.NewReader(preview),
+		PreviewImageName:      imageID + ".png",
+	})
+	return err
+}
+
+// waitForPreviews blocks until Slack has parsed the preview image of every
+// share, or until preview_wait elapses. files.remote.add returns before a
+// preview is ready; unfurling in that window still works — Slack fills the card
+// in on its own — but the screenshot takes far longer to show up, so waiting is
+// worth a few polls. Slack parses the previews concurrently, so one deadline
+// covers the whole message. Failures are not fatal: the unfurls proceed anyway.
+func (b *Bridge) waitForPreviews(ctx context.Context, shares []pendingShare) {
+	if b.cfg.PreviewWait.Duration <= 0 {
+		return
+	}
+	wctx, cancel := context.WithTimeout(ctx, b.cfg.PreviewWait.Duration)
+	defer cancel()
+
+	pending := make([]string, len(shares))
+	for i, sh := range shares {
+		pending[i] = sh.extID
+	}
+
+	for {
+		var notReady []string
+		for _, extID := range pending {
+			file, err := b.api.GetRemoteFileInfoContext(wctx, extID, "")
+			switch {
+			case wctx.Err() != nil:
+				b.log.Printf("previews for %d file(s) not ready after %v; unfurling anyway",
+					len(pending), b.cfg.PreviewWait.Duration)
+				return
+			case err != nil:
+				// Stop tracking this one rather than holding up the others.
+				b.log.Printf("preview status for %q unavailable (%s); unfurling anyway", extID, slackErr(err))
+			case file == nil || !file.HasRichPreview:
+				notReady = append(notReady, extID)
+			}
+		}
+		if len(notReady) == 0 {
+			return
+		}
+		pending = notReady
+
+		select {
+		case <-time.After(previewPollInterval):
+		case <-wctx.Done():
+			b.log.Printf("previews for %d file(s) not ready after %v; unfurling anyway",
+				len(pending), b.cfg.PreviewWait.Duration)
+			return
+		}
+	}
+}
+
+// pageURL is the screenshot's HTML page on the screenshotter server — the
+// remote file's external URL, and so where clicking the card leads. base_url is
+// validated and trailing-slash-trimmed by config.
+func (b *Bridge) pageURL(id string) string {
+	return b.cfg.ScreenshotterBaseURL + "/" + id
+}
+
+// imageFileURL is the canonical PNG URL on the screenshotter server, which the
+// bridge fetches over the (possibly private) network.
 func (b *Bridge) imageFileURL(id string) string {
 	return b.cfg.ScreenshotterBaseURL + "/" + id + ".png"
 }
 
-// uploadPublicImage fetches the screenshot over the (possibly private) network,
-// uploads it to Slack, makes it public, and returns a direct image URL Slack can
-// load in the unfurl (image mode "upload") plus the screenshot metadata.
-func (b *Bridge) uploadPublicImage(ctx context.Context, id, alt string) (string, imageMeta, error) {
-	data, meta, err := b.fetchPNG(ctx, id)
-	if err != nil {
-		return "", imageMeta{}, err // may be errNotFound; let the caller classify it
+// previewTitle returns the card's title, truncated to what Slack will take:
+// the title the server supplied, else the page the screenshot was taken from
+// (more informative than the ID alone), else a fallback naming the image.
+func previewTitle(id string, meta imageMeta) string {
+	title := meta.title
+	if title == "" {
+		title = meta.sourceURL
 	}
-	data, err = b.resize(ctx, data)
-	if err != nil {
-		return "", imageMeta{}, fmt.Errorf("resize: %w", err)
+	if title == "" {
+		return "Screenshot " + id
 	}
-
-	filename := id + ".png"
-	summary, err := b.uploadFile(ctx, slack.UploadFileParameters{
-		Filename: filename,
-		Title:    filename,
-		FileSize: len(data),
-		Reader:   bytes.NewReader(data),
-		AltTxt:   alt,
-	})
-	if err != nil {
-		return "", imageMeta{}, fmt.Errorf("upload: %s", slackErr(err))
+	if runes := []rune(title); len(runes) > maxTitleLen {
+		return string(runes[:maxTitleLen])
 	}
-	if summary == nil || summary.ID == "" {
-		return "", imageMeta{}, errors.New("upload returned no file ID")
-	}
-
-	imageURL, err := b.publicFileURL(ctx, summary.ID)
-	if err != nil {
-		return "", imageMeta{}, fmt.Errorf("make file public: %s", slackErr(err))
-	}
-	return imageURL, meta, nil
+	return title
 }
 
 // slackErr renders a Slack API error with the detail Slack attaches in
@@ -335,109 +386,17 @@ func slackErr(err error) string {
 	return err.Error()
 }
 
-// imageBlock builds an image block that loads the screenshot from a publicly
-// reachable URL — the only image source the link-unfurling API supports.
-// (slack_file references are rejected in unfurls, so the bytes must be served
-// from a URL Slack can fetch: the public server, or a public Slack file URL.)
-// A non-empty title is shown as the image's caption.
-func imageBlock(imageURL, title, alt string) *slack.ImageBlock {
-	var titleObj *slack.TextBlockObject
-	if title != "" {
-		titleObj = slack.NewTextBlockObject(slack.PlainTextType, title, false, false)
-	}
-	return slack.NewImageBlock(imageURL, alt, "", titleObj)
-}
-
-// previewBlocks builds the unfurl's block kit: the screenshot image (captioned
-// with the title when the server provided one) followed by an actions row with
-// "open on <host>" (linking to the screenshot's page on the canonical server,
-// baseURL) and "open the source url" (only when the server provided a source URL).
-func previewBlocks(baseURL, id, imageURL, alt string, meta imageMeta) []slack.Block {
-	blocks := []slack.Block{imageBlock(imageURL, meta.title, alt)}
-	if actions := actionButtons(baseURL, id, meta.sourceURL); actions != nil {
-		blocks = append(blocks, actions)
-	}
-	return blocks
-}
-
-// actionButtons builds the row of link buttons under the image, or nil if there
-// is nothing to link to. The "open on <host>" button points at the screenshot's
-// page on the canonical server (baseURL), so it works regardless of which
-// registered domain the user typed.
-func actionButtons(baseURL, id, sourceURL string) *slack.ActionBlock {
-	var elems []slack.BlockElement
-	if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
-		elems = append(elems, urlButton("open_canonical", "open on "+u.Host, baseURL+"/"+id))
-	}
-	if sourceURL != "" {
-		elems = append(elems, urlButton("open_source", "open the source url", sourceURL))
-	}
-	if len(elems) == 0 {
-		return nil
-	}
-	return slack.NewActionBlock("", elems...)
-}
-
-// urlButton builds a link button: clicking it opens linkURL. Slack still sends a
-// block_actions payload for url buttons, which the bridge acknowledges and
-// ignores (see the Socket Mode loop), so Interactivity must be enabled.
-func urlButton(actionID, text, linkURL string) *slack.ButtonBlockElement {
-	btn := slack.NewButtonBlockElement(actionID, "", slack.NewTextBlockObject(slack.PlainTextType, text, false, false))
-	btn.URL = linkURL
-	return btn
-}
-
-// resize runs the (optional) image conversion under the convert semaphore, so
-// the number of simultaneous decode/resize operations — the memory-heavy step —
+// preparePreview runs the image conversion under the convert semaphore, so the
+// number of simultaneous decode/rescale operations — the memory-heavy step —
 // stays bounded independently of the overall admission limit.
-func (b *Bridge) resize(ctx context.Context, data []byte) ([]byte, error) {
+func (b *Bridge) preparePreview(ctx context.Context, data []byte) ([]byte, error) {
 	select {
 	case b.convert <- struct{}{}:
 		defer func() { <-b.convert }()
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return imageproc.MaybeResize(data, b.cfg.MaxDimension)
-}
-
-// uploadFile uploads to Slack with a per-request timeout.
-func (b *Bridge) uploadFile(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error) {
-	uctx, cancel := context.WithTimeout(ctx, b.cfg.RequestTimeout.Duration)
-	defer cancel()
-	return b.api.UploadFileContext(uctx, params)
-}
-
-// publicFileURL makes an uploaded file publicly retrievable and returns a direct
-// image URL Slack can load, with a per-request timeout. files.sharedPublicURL
-// returns the file's public secret in permalink_public; the loadable image URL
-// is url_private with that secret appended as pub_secret.
-func (b *Bridge) publicFileURL(ctx context.Context, fileID string) (string, error) {
-	fctx, cancel := context.WithTimeout(ctx, b.cfg.RequestTimeout.Duration)
-	defer cancel()
-	file, _, _, err := b.api.ShareFilePublicURLContext(fctx, fileID)
-	if err != nil {
-		return "", err
-	}
-	return publicImageURLFromFile(file)
-}
-
-// publicImageURLFromFile derives a directly-loadable image URL from a file that
-// has been shared publicly, by appending its pub_secret to the private URL. The
-// secret is the last "-"-separated segment of permalink_public.
-func publicImageURLFromFile(file *slack.File) (string, error) {
-	if file == nil || file.URLPrivate == "" || file.PermalinkPublic == "" {
-		return "", errors.New("shared file is missing url_private or permalink_public")
-	}
-	i := strings.LastIndex(file.PermalinkPublic, "-")
-	if i < 0 || i == len(file.PermalinkPublic)-1 {
-		return "", fmt.Errorf("unexpected permalink_public format %q", file.PermalinkPublic)
-	}
-	secret := file.PermalinkPublic[i+1:]
-	sep := "?"
-	if strings.Contains(file.URLPrivate, "?") {
-		sep = "&"
-	}
-	return file.URLPrivate + sep + "pub_secret=" + secret, nil
+	return imageproc.PreparePreview(data, b.cfg.MaxDimension)
 }
 
 // unfurl replaces a shared link with an inline preview, with a per-request
@@ -478,7 +437,7 @@ func decodeMetaHeader(v string) string {
 }
 
 // fetchPNG downloads the full-size image for id from the screenshotter server,
-// returning the bytes and the metadata headers (upload mode).
+// returning the bytes and the metadata headers.
 func (b *Bridge) fetchPNG(ctx context.Context, id string) ([]byte, imageMeta, error) {
 	imgURL := b.imageFileURL(id)
 
@@ -516,33 +475,6 @@ func (b *Bridge) fetchPNG(ctx context.Context, id string) ([]byte, imageMeta, er
 		return nil, imageMeta{}, fmt.Errorf("image %s exceeds %d bytes", id, maxImageBytes)
 	}
 	return data, parseImageMeta(resp.Header), nil
-}
-
-// fetchMeta reads only the screenshot metadata headers from imgURL, without
-// downloading the image body (public_url mode, where Slack loads the bytes
-// itself). It returns errNotFound for a 404 so a vanished image is skipped.
-func (b *Bridge) fetchMeta(ctx context.Context, imgURL string) (imageMeta, error) {
-	fctx, cancel := context.WithTimeout(ctx, b.cfg.RequestTimeout.Duration)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(fctx, http.MethodGet, imgURL, nil)
-	if err != nil {
-		return imageMeta{}, err
-	}
-	resp, err := b.http.Do(req)
-	if err != nil {
-		return imageMeta{}, fmt.Errorf("fetch %s: %w", imgURL, err)
-	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusNotFound:
-		return imageMeta{}, errNotFound
-	default:
-		return imageMeta{}, fmt.Errorf("fetch %s: unexpected status %d", imgURL, resp.StatusCode)
-	}
-	return parseImageMeta(resp.Header), nil
 }
 
 // extractID returns the image ID encoded in a shared link, and whether the

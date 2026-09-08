@@ -6,42 +6,22 @@
 # The bridge connects to Slack over Socket Mode (an outbound WebSocket), so the
 # screenshotter server it reads from does NOT need to be reachable from the
 # public internet — only the bridge needs outbound HTTPS access to Slack.
+#
+# Each recognised link is registered with Slack as a "remote file" whose preview
+# image Slack stores workspace-privately, and the link is replaced by a card
+# showing that preview. Clicking the card opens the screenshot's page on
+# screenshotter_base_url, so only people who can reach your server see the
+# full-size image.
 
 # ---------------------------------------------------------------------------
 # Screenshotter server
 # ---------------------------------------------------------------------------
 
-# How the screenshot image is supplied to Slack's unfurl:
-#
-#   "upload"      (default) The bridge FETCHES the PNG over the (possibly
-#                 private) network, uploads it to Slack, and makes it public via
-#                 files.sharedPublicURL so the unfurl can load it. Works even
-#                 when the screenshotter server is NOT reachable from the
-#                 internet. Needs the files:write scope. Note: each rendered
-#                 screenshot becomes retrievable by anyone who has the
-#                 (unguessable) slack-files.com URL.
-#   "public_url"  The bridge points Slack at the image on screenshotter_base_url
-#                 directly — no download, no upload, no file scopes. Requires
-#                 base_url to be reachable by Slack's servers and to serve PNGs
-#                 without auth (require_auth_to_view = false).
-#   "none"        No in-place unfurl: the bridge posts the screenshot as a
-#                 threaded file reply, which stays workspace-private (never made
-#                 public). Requires the bot to be in the channel and the
-#                 files:write scope.
-#
-# The unfurl modes (upload, public_url) fall back to the same threaded file post
-# when the in-place unfurl can't be produced, so files:write is useful there too.
-# NOTE: "upload" is not fully implemented yet — it needs a user token for
-# files.sharedPublicURL (see plans/slack-bridge-upload-mode-user-token.md); until
-# then it degrades to the threaded fallback.
-image_mode = "upload"
-
 # Canonical base URL of the screenshotter server (no trailing slash). It is the
-# single source of truth for the image and the "open on <host>" button; the
-# posted link only supplies the image ID. In "upload" mode the bridge fetches the
-# PNG from here, so it may be a private address (e.g. on your tailnet). In
-# "public_url" mode Slack loads the image from here directly, so it must be a
-# public, Slack-reachable URL. Required in both modes.
+# single source of truth: the bridge fetches <base_url>/<id>.png from here, and
+# <base_url>/<id> becomes the card's click-through target. The posted link only
+# supplies the image ID. Slack never fetches this URL itself, so it may be a
+# private address (e.g. on your tailnet). Required.
 screenshotter_base_url = "http://screenshotter.internal:8080"
 
 # Hostnames that, when posted in Slack, this bridge should unfurl. These must
@@ -55,12 +35,12 @@ screenshotter_base_url = "http://screenshotter.internal:8080"
 # server endpoints (see excluded_paths below). The link may omit the .png suffix.
 unfurl_domains = ["screen.corp.example"]
 
-# Each unfurl gets an "open on <host>" button linking back to the screenshot's
-# page on the host the user shared (derived from the link — no extra config). The
-# unfurl also shows the screenshot's title and an "open the source url" button
-# when the server sends the X-Screenshot-Title / X-Screenshot-Source-Url headers
-# on the image response. NOTE: the buttons require Interactivity to be enabled in
-# the Slack app (see docs/slack.md); without it, Slack will not render them.
+# The card's title is the screenshot's title when the server sends the
+# X-Screenshot-Title header on the image response, otherwise the page it was
+# captured from (X-Screenshot-Source-Url), otherwise "Screenshot <id>". The
+# source URL is also stored as the file's indexable contents, since the card has
+# no room to show it separately. A Slack file card cannot carry buttons, so there
+# is nothing to configure for those and Interactivity is not needed.
 
 # ---------------------------------------------------------------------------
 # Slack credentials
@@ -81,18 +61,29 @@ app_token_env_var = "SLACK_APP_TOKEN"
 # Image handling
 # ---------------------------------------------------------------------------
 
-# Cap the largest side (width or height) of an uploaded image, in pixels.
-# Larger screenshots are downscaled (aspect ratio preserved) before upload,
-# which bounds upload size and latency. 0 (default) uploads full-resolution
-# PNGs and lets Slack generate its own preview thumbnails.
-# max_dimension = 0
+# Cap the largest side (width or height) of the preview image, in pixels. Larger
+# screenshots are downscaled to it (aspect ratio preserved), which bounds upload
+# size and latency; the card links through to the full-resolution image, so the
+# preview does not need to be pixel-exact. Set 0 to send previews at full
+# resolution. Must be 0 or at least 300 — Slack rejects a preview whose width or
+# height is under 300 px. Default: 1600.
+# max_dimension = 1600
+
+# Slack parses the preview image asynchronously and files.remote.add returns
+# before it is ready (about 2s in practice). The bridge polls until the preview
+# is ready, up to this long, and then unfurls regardless. Unfurling early is not
+# an error — Slack fills the card in by itself — but the screenshot then takes
+# much longer to appear (~12s observed, against ~3s when the bridge waits).
+# Set "0s" to unfurl immediately and skip the polling (and the
+# remote_files:read scope). Default: 8s.
+# preview_wait = "8s"
 
 # ---------------------------------------------------------------------------
 # Limits (resource / abuse protection)
 # ---------------------------------------------------------------------------
 
 # Timeout applied to each outbound request: fetching an image AND each Slack API
-# call (upload, unfurl, user/usergroup lookups). Default: 30s.
+# call (remote file add/info, unfurl, user/usergroup lookups). Default: 30s.
 # request_timeout = "30s"
 
 # Maximum number of link_shared events handled in parallel (the network/Slack
@@ -100,14 +91,15 @@ app_token_env_var = "SLACK_APP_TOKEN"
 # can't pile up unbounded under a flood. Default: 50.
 # max_concurrency = 50
 
-# Maximum number of images decoded/resized in parallel. Image conversion is the
+# Maximum number of images decoded/rescaled in parallel. Image conversion is the
 # memory-heavy step (a decoded image is much larger than its PNG), so it is
 # bounded separately from — and more tightly than — max_concurrency. Default: 4.
 # max_image_workers = 4
 
 # Maximum number of screenshot links rendered from a single Slack message,
-# limiting amplification from one post. Default: 4.
-# max_links_per_message = 4
+# limiting amplification from one post. Slack itself unfurls at most 5 links per
+# message, so raising this above 5 has no effect. Default: 5.
+# max_links_per_message = 5
 
 # Additional first path segments to never treat as image IDs, on top of the
 # built-in list of known server endpoints (upload, assets, static, thumb, admin,

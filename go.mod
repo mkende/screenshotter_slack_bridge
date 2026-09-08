@@ -1,6 +1,6 @@
 module github.com/mkende/screenshotter_slack_bridge
 
-go 1.25.0
+go 1.26
 
 toolchain go1.27.0
 
@@ -11,3 +11,5 @@ require (
 )
 
 require github.com/gorilla/websocket v1.5.3 // indirect
+
+replace github.com/slack-go/slack => github.com/mkende/slack-go v0.0.0-20260908205621-941a19f30d5c
