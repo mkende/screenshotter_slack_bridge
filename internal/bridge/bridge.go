@@ -351,10 +351,15 @@ func (b *Bridge) pageURL(id string) string {
 	return b.cfg.ScreenshotterBaseURL + "/" + id
 }
 
-// imageFileURL is the canonical PNG URL on the screenshotter server, which the
-// bridge fetches over the (possibly private) network.
+// imageFileURL is the PNG URL on the screenshotter server, which the bridge
+// fetches over the (possibly private) network. no_redirect=1 tells the server
+// to serve the image on whichever address the request arrived on rather than
+// 301-ing to its canonical_address: the bridge reaches the server over a
+// private network, on which the canonical address typically does not resolve,
+// and it does not follow redirects (see newHTTPClient). It is a no-op on a
+// server whose canonical address is the one configured here.
 func (b *Bridge) imageFileURL(id string) string {
-	return b.cfg.ScreenshotterBaseURL + "/" + id + ".png"
+	return b.cfg.ScreenshotterBaseURL + "/" + id + ".png?no_redirect=1"
 }
 
 // previewTitle returns the card's title, truncated to what Slack will take:

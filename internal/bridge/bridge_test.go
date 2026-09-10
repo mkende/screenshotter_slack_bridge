@@ -575,6 +575,23 @@ func TestSkipsThePreviewWaitWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestRenderFetchesWithNoRedirect(t *testing.T) {
+	var gotURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.RequestURI
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(testPNG(t, 800, 600))
+	}))
+	defer srv.Close()
+
+	b := newTestBridge(t, &fakeAPI{}, baseConfig(srv.URL))
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	if gotURI != "/abcdef.png?no_redirect=1" {
+		t.Errorf("fetched %q, want the PNG path with no_redirect=1 so the server does not 301 to its canonical address", gotURI)
+	}
+}
+
 func TestRenderSkipsMissingImage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
