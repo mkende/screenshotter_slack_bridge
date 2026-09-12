@@ -1,0 +1,46 @@
+name: Tag release
+
+# Creates a vX.Y.Z git tag from the VERSION file on main whenever the Test
+# workflow completes successfully, if that tag does not already exist. The
+# module sits at the root of this repository, so the tag carries no prefix;
+# that is what makes `go install ...@vX.Y.Z` resolve here.
+
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  tag:
+    name: Create version tag
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Read version
+        id: version
+        run: echo "value=v$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag does not already exist
+        id: check
+        run: |
+          if git rev-parse "${{ steps.version.outputs.value }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.value }}"
+          git push origin "${{ steps.version.outputs.value }}"

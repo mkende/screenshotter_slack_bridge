@@ -1,0 +1,32 @@
+name: Remove safe-to-test label
+
+# Removes the 'safe-to-test' label whenever new commits are pushed to a PR.
+# This forces maintainers to re-review and re-approve after each push,
+# preventing a previously-approved label from covering new (unreviewed) code.
+
+on:
+  pull_request_target:
+    types: [synchronize]
+
+jobs:
+  remove-label:
+    name: Remove approval label on new commits
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Remove safe-to-test label
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                name: 'safe-to-test',
+              });
+            } catch (e) {
+              // Label may not exist; 404 is expected and harmless.
+              if (e.status !== 404) throw e;
+            }

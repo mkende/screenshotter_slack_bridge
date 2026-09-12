@@ -1,0 +1,33 @@
+name: Test (external PR)
+
+# Runs the full test suite for PRs from external contributors after a maintainer
+# adds the 'safe-to-test' label, by re-invoking test.yml as a reusable workflow
+# and passing the PR head SHA to check out. Uses pull_request_target so it can be
+# triggered from forks; because test.yml is referenced locally, its definition is
+# loaded from the trusted base branch — only the checked-out source comes from
+# the fork.
+#
+# SECURITY NOTE: This workflow intentionally uses no repository secrets and
+# forwards none to test.yml (reusable workflows receive no secrets unless
+# explicitly passed). If secrets are ever added to the test suite, review this
+# file carefully — pull_request_target runs with base-branch permissions.
+
+on:
+  pull_request_target:
+    types: [labeled]
+    branches: [main]
+
+jobs:
+  test:
+    name: Approved external PR
+    # Only run when the approval label is added, and only for contributors who
+    # are not already trusted (OWNER/MEMBER/COLLABORATOR run via test.yml).
+    if: |
+      github.event.label.name == 'safe-to-test' &&
+      !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+    # Cap the pull_request_target token to read-only for the called workflow.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}

@@ -1,0 +1,75 @@
+name: Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # Reusable entry point for test-external.yml: it re-invokes this workflow under
+  # pull_request_target (after a maintainer adds the 'safe-to-test' label) and
+  # passes the PR head SHA to check out. Edit the jobs here; the callers only
+  # gate who is allowed to run them.
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref or SHA to check out; defaults to the triggering ref.
+        type: string
+        required: false
+        default: ''
+
+# Run for pushes, manual dispatch, and the gated external call (which arrives as
+# pull_request_target — only reachable through test-external.yml, which has
+# already checked the label). For direct pull_request events, only run
+# automatically when the author is a repo owner/member/collaborator AND the head
+# branch lives in this repo (not a fork); everything else requires the
+# 'safe-to-test' label. This prevents CI abuse from forks while keeping the suite
+# runnable externally once approved.
+
+jobs:
+  slack:
+    name: Slack bridge tests
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name != 'pull_request' ||
+      (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          # Disable caching on the external (pull_request_target) path: its cache
+          # writes would land in the base-branch scope and could be restored by
+          # trusted runs (cache poisoning). inputs.ref is only set by
+          # test-external.yml.
+          cache: ${{ inputs.ref == '' }}
+
+      - name: Build
+        run: go build ./...
+
+      # `just` is not on the runner image. Fetch the pinned release and verify
+      # its checksum, rather than depending on another third-party action.
+      - name: Install just
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o just.tar.gz \
+            https://github.com/casey/just/releases/download/1.58.0/just-1.58.0-x86_64-unknown-linux-musl.tar.gz
+          echo "4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d  just.tar.gz" | sha256sum -c -
+          tar -xzf just.tar.gz just
+          sudo install just /usr/local/bin/just
+
+      - name: Lint
+        run: just lint
+
+      - name: Check formatting
+        run: just check-format
+
+      - name: Test
+        run: go test -race -count=1 ./...
