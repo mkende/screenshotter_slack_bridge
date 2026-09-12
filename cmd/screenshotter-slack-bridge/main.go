@@ -13,9 +13,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/slack-go/slack"
-	"github.com/slack-go/slack/slackevents"
-	"github.com/slack-go/slack/socketmode"
+	"github.com/mkende/slack-go"
+	"github.com/mkende/slack-go/slackevents"
+	"github.com/mkende/slack-go/socketmode"
 
 	"github.com/mkende/screenshotter_slack_bridge/internal/bridge"
 	"github.com/mkende/screenshotter_slack_bridge/internal/config"

@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/slack-go/slack"
-	"github.com/slack-go/slack/slackevents"
+	"github.com/mkende/slack-go"
+	"github.com/mkende/slack-go/slackevents"
 
 	"github.com/mkende/screenshotter_slack_bridge/internal/config"
 	"github.com/mkende/screenshotter_slack_bridge/internal/imageproc"
