@@ -36,6 +36,15 @@ docker run --rm \
 The container needs only the config file and the two token variables. Its egress
 must reach `*.slack.com` and the Screenshotter server.
 
+## Install with Go
+
+```sh
+go install github.com/mkende/screenshotter_slack_bridge/cmd/screenshotter-slack-bridge@latest
+```
+
+No C compiler needed. Versions before `v0.2.0` cannot be installed this way:
+their `go.mod` carried a `replace` directive, which `go install` refuses.
+
 ## Build from source
 
 Go 1.26 or later; no CGo.
