@@ -27,8 +27,8 @@ on:
 # runnable externally once approved.
 
 jobs:
-  slack:
-    name: Slack bridge tests
+  test:
+    name: Tests
     runs-on: ubuntu-latest
     if: |
       github.event_name != 'pull_request' ||
