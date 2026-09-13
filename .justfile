@@ -9,6 +9,8 @@ test:
 # GOTOOLCHAIN pins the toolchain staticcheck analyses with: v0.8.1 cannot parse
 # the Go 1.27 standard library this module's toolchain directive selects. Drop
 # the pin once a staticcheck release supports Go 1.27 (see issue #50).
+# The staticcheck version is updated by Renovate, through a custom manager in
+# renovate.json; the GOTOOLCHAIN pin above is deliberately left to us.
 lint:
     go vet ./...
     GOTOOLCHAIN=go1.26.8 go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
