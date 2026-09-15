@@ -3,7 +3,9 @@
 Renders Screenshotter links posted in Slack as inline image previews. It
 connects to Slack over Socket Mode — an outbound WebSocket — and fetches
 screenshots over your own network, so the Screenshotter server needs no public
-exposure and no inbound path from Slack.
+exposure and no inbound path from Slack. See also the
+[Screenshotter server](https://github.com/mkende/screenshotter_server) it pairs
+with.
 
 A pre-built container image is published at
 [ghcr.io/mkende/screenshotter-slack-bridge](https://github.com/users/mkende/packages/container/package/screenshotter-slack-bridge).
