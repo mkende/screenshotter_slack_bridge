@@ -345,6 +345,29 @@ func TestRemoteFileLinksToTheBaseURLPageNotTheLinkHost(t *testing.T) {
 	}
 }
 
+func TestFetchBaseURLOverridesWhereTheImageIsFetchedFrom(t *testing.T) {
+	// A Kubernetes-style split: the bridge fetches over an in-cluster address
+	// while the card still links to the one readers can open.
+	srv, hits := pngServerWithMeta(t, testPNG(t, 800, 600), "", "")
+	defer srv.Close()
+
+	api := &fakeAPI{}
+	cfg := baseConfig("https://screen.corp.example")
+	cfg.ScreenshotterFetchBaseURL = srv.URL // the only address that answers
+	b := newTestBridge(t, api, cfg)
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	if atomic.LoadInt32(hits) != 1 {
+		t.Errorf("expected exactly one fetch from the fetch base URL, got %d", atomic.LoadInt32(hits))
+	}
+	if len(api.adds) != 1 {
+		t.Fatalf("expected 1 files.remote.add, got %d", len(api.adds))
+	}
+	if want := "https://screen.corp.example/abcdef"; api.adds[0].params.ExternalURL != want {
+		t.Errorf("external URL = %q, want the canonical page %q", api.adds[0].params.ExternalURL, want)
+	}
+}
+
 func TestRemoteFileTitleFallsBackToTheSourceURLThenTheID(t *testing.T) {
 	for _, tc := range []struct {
 		name, title, source, want string

@@ -345,21 +345,26 @@ func (b *Bridge) waitForPreviews(ctx context.Context, shares []pendingShare) {
 }
 
 // pageURL is the screenshot's HTML page on the screenshotter server — the
-// remote file's external URL, and so where clicking the card leads. base_url is
-// validated and trailing-slash-trimmed by config.
+// remote file's external URL, and so where clicking the card leads. It is
+// always built on screenshotter_base_url, the address readers open, never on
+// the bridge's own screenshotter_fetch_base_url. base_url is validated and
+// trailing-slash-trimmed by config.
 func (b *Bridge) pageURL(id string) string {
 	return b.cfg.ScreenshotterBaseURL + "/" + id
 }
 
 // imageFileURL is the PNG URL on the screenshotter server, which the bridge
-// fetches over the (possibly private) network. no_redirect=1 tells the server
-// to serve the image on whichever address the request arrived on rather than
-// 301-ing to its canonical_address: the bridge reaches the server over a
-// private network, on which the canonical address typically does not resolve,
-// and it does not follow redirects (see newHTTPClient). It is a no-op on a
-// server whose canonical address is the one configured here.
+// fetches over the (possibly private) network. It is built on the config's
+// FetchBaseURL, which is screenshotter_fetch_base_url where a deployment gives
+// the bridge its own address for the server (an in-cluster Service, say) and
+// screenshotter_base_url otherwise. no_redirect=1 tells the server to serve the
+// image on whichever address the request arrived on rather than 301-ing to its
+// canonical_address: the bridge reaches the server over a private network, on
+// which the canonical address typically does not resolve, and it does not
+// follow redirects (see newHTTPClient). It is a no-op on a server whose
+// canonical address is the one configured here.
 func (b *Bridge) imageFileURL(id string) string {
-	return b.cfg.ScreenshotterBaseURL + "/" + id + ".png?no_redirect=1"
+	return b.cfg.FetchBaseURL() + "/" + id + ".png?no_redirect=1"
 }
 
 // previewTitle returns the card's title, truncated to what Slack will take:

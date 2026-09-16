@@ -35,6 +35,12 @@ request_timeout = "10s"
 	if cfg.ScreenshotterBaseURL != "http://internal:8080" {
 		t.Errorf("trailing slash not trimmed: %q", cfg.ScreenshotterBaseURL)
 	}
+	if cfg.ScreenshotterFetchBaseURL != "" {
+		t.Errorf("screenshotter_fetch_base_url should default to empty, got %q", cfg.ScreenshotterFetchBaseURL)
+	}
+	if cfg.FetchBaseURL() != "http://internal:8080" {
+		t.Errorf("FetchBaseURL should fall back to the base URL, got %q", cfg.FetchBaseURL())
+	}
 	if cfg.UnfurlDomains[0] != "screen.corp.example" {
 		t.Errorf("domain not lowercased: %q", cfg.UnfurlDomains[0])
 	}
@@ -167,5 +173,41 @@ app_token = "xapp-app"
 `)
 	if _, err := Load(p); err == nil {
 		t.Error("expected error when screenshotter_base_url is missing")
+	}
+}
+
+func TestLoadFetchBaseURL(t *testing.T) {
+	p := writeConfig(t, `
+screenshotter_base_url = "https://screen.corp.example"
+screenshotter_fetch_base_url = "http://screenshotter.default.svc/"
+unfurl_domains = ["screen.corp.example"]
+bot_token = "xoxb-bot"
+app_token = "xapp-app"
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ScreenshotterFetchBaseURL != "http://screenshotter.default.svc" {
+		t.Errorf("trailing slash not trimmed: %q", cfg.ScreenshotterFetchBaseURL)
+	}
+	if cfg.FetchBaseURL() != "http://screenshotter.default.svc" {
+		t.Errorf("FetchBaseURL should be the override, got %q", cfg.FetchBaseURL())
+	}
+	if cfg.ScreenshotterBaseURL != "https://screen.corp.example" {
+		t.Errorf("the fetch override must not touch the canonical base URL: %q", cfg.ScreenshotterBaseURL)
+	}
+}
+
+func TestLoadRejectsRelativeFetchBaseURL(t *testing.T) {
+	p := writeConfig(t, `
+screenshotter_base_url = "https://screen.corp.example"
+screenshotter_fetch_base_url = "screenshotter.default.svc"
+unfurl_domains = ["screen.corp.example"]
+bot_token = "xoxb-bot"
+app_token = "xapp-app"
+`)
+	if _, err := Load(p); err == nil {
+		t.Error("expected an error when screenshotter_fetch_base_url is not absolute")
 	}
 }

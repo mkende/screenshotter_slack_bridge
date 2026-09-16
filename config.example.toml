@@ -17,12 +17,20 @@
 # Screenshotter server
 # ---------------------------------------------------------------------------
 
-# Canonical base URL of the screenshotter server (no trailing slash). It is the
-# single source of truth: the bridge fetches <base_url>/<id>.png from here, and
-# <base_url>/<id> becomes the card's click-through target. The posted link only
-# supplies the image ID. Slack never fetches this URL itself, so it may be a
-# private address (e.g. on your tailnet). Required.
+# Canonical base URL of the screenshotter server (no trailing slash):
+# <base_url>/<id> becomes the card's click-through target, and the bridge
+# fetches <base_url>/<id>.png from here unless screenshotter_fetch_base_url
+# below says otherwise. The posted link only supplies the image ID. Slack never
+# fetches this URL itself, so it may be a private address (e.g. on your
+# tailnet). Required.
 screenshotter_base_url = "http://screenshotter.internal:8080"
+
+# Base URL the bridge itself uses to reach the server (no trailing slash), when
+# that differs from the address readers click through to. Typically a Kubernetes
+# deployment, where the bridge talks to the server on its in-cluster Service
+# while screenshotter_base_url stays the address people open in their browser.
+# Default: unset, i.e. fetch from screenshotter_base_url.
+#screenshotter_fetch_base_url = "http://screenshotter.default.svc"
 
 # Hostnames that, when posted in Slack, this bridge should unfurl. These must
 # match the "App unfurl domains" registered in your Slack app AND the hostnames

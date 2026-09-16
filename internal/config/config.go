@@ -17,12 +17,24 @@ import (
 // Config holds the bridge's runtime configuration.
 type Config struct {
 	// ScreenshotterBaseURL is the canonical base URL of the screenshotter server
-	// (no trailing slash); the posted link only supplies the image ID. The bridge
-	// fetches the PNG from here and uses it as the remote file's external URL —
-	// the address people land on when they click the card — so it may be, and is
-	// meant to be, a private address (e.g. "http://screenshotter.internal:8080"):
-	// only Slack members who can reach it get the full screenshot. Required.
+	// (no trailing slash); the posted link only supplies the image ID. It is used
+	// as the remote file's external URL — the address people land on when they
+	// click the card — and, unless ScreenshotterFetchBaseURL overrides it, as the
+	// address the bridge fetches the PNG from. Slack itself never fetches it, so
+	// it may be, and is meant to be, a private address (e.g.
+	// "http://screenshotter.internal:8080"): only Slack members who can reach it
+	// get the full screenshot. Required.
 	ScreenshotterBaseURL string `toml:"screenshotter_base_url"`
+
+	// ScreenshotterFetchBaseURL, when set, is the base URL the bridge itself uses
+	// to fetch images from the server (no trailing slash), leaving
+	// ScreenshotterBaseURL to name only the address the card links to. Set it
+	// where the two differ — typically a Kubernetes deployment in which the
+	// bridge reaches the server on its in-cluster Service
+	// ("http://screenshotter.default.svc") while readers open it on the address
+	// their browser resolves. Default: empty, i.e. fetch from
+	// ScreenshotterBaseURL.
+	ScreenshotterFetchBaseURL string `toml:"screenshotter_fetch_base_url"`
 
 	// UnfurlDomains is the list of hostnames that, when seen in a Slack message,
 	// the bridge will unfurl. These must match the "App unfurl domains"
@@ -159,11 +171,19 @@ func (c *Config) validate() error {
 	if c.ScreenshotterBaseURL == "" {
 		return fmt.Errorf("screenshotter_base_url is required")
 	}
-	u, err := url.Parse(c.ScreenshotterBaseURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return fmt.Errorf("screenshotter_base_url must be an absolute URL like \"https://host\"")
+	normalized, err := normalizeBaseURL("screenshotter_base_url", c.ScreenshotterBaseURL)
+	if err != nil {
+		return err
 	}
-	c.ScreenshotterBaseURL = strings.TrimRight(c.ScreenshotterBaseURL, "/")
+	c.ScreenshotterBaseURL = normalized
+
+	if c.ScreenshotterFetchBaseURL != "" {
+		normalized, err := normalizeBaseURL("screenshotter_fetch_base_url", c.ScreenshotterFetchBaseURL)
+		if err != nil {
+			return err
+		}
+		c.ScreenshotterFetchBaseURL = normalized
+	}
 
 	if len(c.UnfurlDomains) == 0 {
 		return fmt.Errorf("unfurl_domains must list at least one domain")
@@ -231,4 +251,24 @@ func resolveSecret(inlineKey, inlineVal, envKey, envVar string) (string, error) 
 		return v, nil
 	}
 	return inlineVal, nil
+}
+
+// FetchBaseURL is the base URL the bridge fetches images from: the dedicated
+// screenshotter_fetch_base_url when the deployment sets one, otherwise the
+// canonical screenshotter_base_url the card links to.
+func (c *Config) FetchBaseURL() string {
+	if c.ScreenshotterFetchBaseURL != "" {
+		return c.ScreenshotterFetchBaseURL
+	}
+	return c.ScreenshotterBaseURL
+}
+
+// normalizeBaseURL checks that a base URL is absolute and strips any trailing
+// slashes, so callers can append "/<id>" to it.
+func normalizeBaseURL(key, value string) (string, error) {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("%s must be an absolute URL like \"https://host\"", key)
+	}
+	return strings.TrimRight(value, "/"), nil
 }

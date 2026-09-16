@@ -67,6 +67,9 @@ every option is documented inline there. The three required settings are:
 - `screenshotter_base_url` — the canonical base URL of your Screenshotter
   server. The bridge fetches `<base_url>/<id>.png` from it and uses
   `<base_url>/<id>` as the card's click-through. It may be a private address.
+  Where the bridge reaches the server on a different address than the readers
+  do — a Kubernetes Service, say — the optional `screenshotter_fetch_base_url`
+  overrides it for the bridge's own fetches.
 - `unfurl_domains` — the hostnames to unfurl, matching the "App unfurl domains"
   registered in your Slack app.
 - The two Slack tokens, a bot token (`xoxb-…`) and an app-level token
