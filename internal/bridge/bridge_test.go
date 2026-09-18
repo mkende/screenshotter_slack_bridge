@@ -309,6 +309,11 @@ func TestRenderUnfurlsWithASingleFileBlock(t *testing.T) {
 	if !att.HideColor {
 		t.Error("unfurl should set hide_color, dropping the card's colour bar")
 	}
+	// The fallback is what the client shows in place of the card while the
+	// message is being edited; without it Slack renders "[no preview available]".
+	if want := api.adds[0].params.Title; att.Fallback != want {
+		t.Errorf("unfurl fallback = %q, want the card title %q", att.Fallback, want)
+	}
 }
 
 func TestRemoteFileLinksToTheBaseURLPageNotTheLinkHost(t *testing.T) {

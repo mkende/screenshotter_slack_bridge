@@ -189,7 +189,7 @@ func (b *Bridge) HandleLinkShared(ctx context.Context, teamID string, ev *slacke
 			break
 		}
 		attempted++
-		extID, err := b.registerShare(ctx, ev, id)
+		sh, err := b.registerShare(ctx, ev, link.URL, id)
 		if err != nil {
 			if errors.Is(err, errNotFound) {
 				b.log.Printf("image %q not found, skipping", id)
@@ -198,7 +198,7 @@ func (b *Bridge) HandleLinkShared(ctx context.Context, teamID string, ev *slacke
 			b.log.Printf("registering %q failed: %v", id, err)
 			continue
 		}
-		shares = append(shares, pendingShare{link: link.URL, id: id, extID: extID})
+		shares = append(shares, sh)
 	}
 	if len(shares) == 0 {
 		return
@@ -221,26 +221,27 @@ type pendingShare struct {
 	link  string // the URL as posted, which keys the unfurl
 	id    string // the image ID, for logging
 	extID string // the remote file registered for this share
+	title string // the card's title, reused as the attachment's plain-text fallback
 }
 
 // registerShare fetches the screenshot and registers this share of it as a
-// remote file, returning the external ID it was registered under. The
-// memory-heavy image conversion is bounded by preparePreview.
-func (b *Bridge) registerShare(ctx context.Context, ev *slackevents.LinkSharedEvent, id string) (string, error) {
+// remote file, returning the share to unfurl. The memory-heavy image
+// conversion is bounded by preparePreview.
+func (b *Bridge) registerShare(ctx context.Context, ev *slackevents.LinkSharedEvent, link, id string) (pendingShare, error) {
 	data, meta, err := b.fetchPNG(ctx, id)
 	if err != nil {
-		return "", err // may be errNotFound; let the caller classify it
+		return pendingShare{}, err // may be errNotFound; let the caller classify it
 	}
 	preview, err := b.preparePreview(ctx, data)
 	if err != nil {
-		return "", fmt.Errorf("prepare preview: %w", err)
+		return pendingShare{}, fmt.Errorf("prepare preview: %w", err)
 	}
 
-	extID := shareExternalID(id, ev)
-	if err := b.addRemoteFile(ctx, extID, id, preview, meta); err != nil {
-		return "", fmt.Errorf("files.remote.add: %s", slackErr(err))
+	sh := pendingShare{link: link, id: id, extID: shareExternalID(id, ev), title: previewTitle(id, meta)}
+	if err := b.addRemoteFile(ctx, sh, preview, meta); err != nil {
+		return pendingShare{}, fmt.Errorf("files.remote.add: %s", slackErr(err))
 	}
-	return extID, nil
+	return sh, nil
 }
 
 // unfurlShare replaces the posted link with a card for its remote file.
@@ -248,9 +249,12 @@ func (b *Bridge) unfurlShare(ctx context.Context, ev *slackevents.LinkSharedEven
 	// A file block must be the only block in the unfurl, so the title and the
 	// click-through both come from the remote file itself. HideColor drops the
 	// coloured bar down the card's left edge, which Slack allows only for a
-	// lone file block.
+	// lone file block. Fallback is what clients show where blocks cannot be
+	// rendered — notably the chip standing in for the card while the message is
+	// being edited, which otherwise reads "[no preview available]".
 	unfurls := map[string]slack.Attachment{
 		sh.link: {
+			Fallback:  sh.title,
 			HideColor: true,
 			Blocks:    slack.Blocks{BlockSet: []slack.Block{slack.NewFileBlock("", sh.extID, "remote")}},
 		},
@@ -274,23 +278,23 @@ func shareExternalID(id string, ev *slackevents.LinkSharedEvent) string {
 	return id + "-" + ev.Channel + "-" + ev.MessageTimeStamp
 }
 
-// addRemoteFile registers this share of the screenshot as a remote file under
-// externalID. imageID identifies the screenshot itself: it names the preview
-// upload, builds the external URL — the screenshot's page on the canonical
-// server, where the card's click-through leads — and is the last-resort title.
-func (b *Bridge) addRemoteFile(ctx context.Context, externalID, imageID string, preview []byte, meta imageMeta) error {
+// addRemoteFile registers the share as a remote file under its external ID.
+// The image ID names the preview upload and builds the external URL — the
+// screenshot's page on the canonical server, where the card's click-through
+// leads.
+func (b *Bridge) addRemoteFile(ctx context.Context, sh pendingShare, preview []byte, meta imageMeta) error {
 	actx, cancel := context.WithTimeout(ctx, b.cfg.RequestTimeout.Duration)
 	defer cancel()
 	_, err := b.api.AddRemoteFileContext(actx, slack.RemoteFileParameters{
-		ExternalID:  externalID,
-		ExternalURL: b.pageURL(imageID),
-		Title:       previewTitle(imageID, meta),
+		ExternalID:  sh.extID,
+		ExternalURL: b.pageURL(sh.id),
+		Title:       sh.title,
 		Filetype:    "png",
 		// The card has no room for the source URL, so it is stored as the file's
 		// indexable contents instead of being dropped.
 		IndexableFileContents: strings.TrimSpace(meta.title + " " + meta.sourceURL),
 		PreviewImageReader:    bytes.NewReader(preview),
-		PreviewImageName:      imageID + ".png",
+		PreviewImageName:      sh.id + ".png",
 	})
 	return err
 }
