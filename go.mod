@@ -1,8 +1,8 @@
 module github.com/mkende/screenshotter_slack_bridge
 
-go 1.26
+go 1.26.0
 
-toolchain go1.27.0
+toolchain go1.27.1
 
 require (
 	github.com/BurntSushi/toml v1.6.0
@@ -15,7 +15,7 @@ require (
 	// `go install pkg@version` refuses any module whose go.mod carries one,
 	// which would leave the published bridge uninstallable.
 	github.com/mkende/slack-go v0.0.0-20260912162126-8cc1d2229508
-	golang.org/x/image v0.45.0
+	golang.org/x/image v0.46.0
 )
 
 require github.com/gorilla/websocket v1.5.3 // indirect
