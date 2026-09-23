@@ -8,7 +8,7 @@ exposure and no inbound path from Slack. See also the
 with.
 
 A pre-built container image is published at
-[ghcr.io/mkende/screenshotter-slack-bridge](https://github.com/users/mkende/packages/container/package/screenshotter-slack-bridge).
+[ghcr.io/screenshotter-org/screenshotter-slack-bridge](https://github.com/orgs/screenshotter-org/packages/container/package/screenshotter-slack-bridge).
 
 Full documentation — Slack app setup, every configuration option, and
 deployment — is at
@@ -32,7 +32,7 @@ $EDITOR config.toml
 docker run --rm \
   -v "$PWD/config.toml:/app/config.toml:ro" \
   -e SLACK_BOT_TOKEN -e SLACK_APP_TOKEN \
-  ghcr.io/mkende/screenshotter-slack-bridge:latest
+  ghcr.io/screenshotter-org/screenshotter-slack-bridge:latest
 ```
 
 The container needs only the config file and the two token variables. Its egress
