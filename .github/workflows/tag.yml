@@ -3,7 +3,9 @@ name: Tag release
 # Creates a vX.Y.Z git tag from the VERSION file on main whenever the Test
 # workflow completes successfully, if that tag does not already exist. The
 # module sits at the root of this repository, so the tag carries no prefix;
-# that is what makes `go install ...@vX.Y.Z` resolve here.
+# that is what makes `go install ...@vX.Y.Z` resolve here. A new tag is then
+# requested from the Go module proxy, so the version is published there and in
+# the module index at once rather than on its first download.
 
 on:
   workflow_run:
@@ -44,3 +46,32 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "${{ steps.version.outputs.value }}"
           git push origin "${{ steps.version.outputs.value }}"
+
+      # The proxy fetches a version from this repository the first time it is
+      # asked for it, and index.golang.org records that moment as the version's
+      # timestamp, which some enterprise proxies and firewalls check a version's
+      # age against. Asking right away starts that clock at the release instead
+      # of at the first user's download. A tag pushed with GITHUB_TOKEN triggers
+      # no workflow, so this has to run here rather than on the tag.
+      - name: Publish the version to the Go module proxy
+        if: steps.check.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          module=$(awk '$1 == "module" { print $2; exit }' go.mod)
+          # The proxy protocol spells each upper-case letter as "!" and its
+          # lower-case form.
+          escaped=$(printf '%s' "$module" | sed 's/[A-Z]/!\L&/g')
+          url="https://proxy.golang.org/$escaped/@v/$VERSION.info"
+          # The proxy can take a moment to see a tag pushed seconds ago.
+          for delay in 5 10 20 30 60 60 0; do
+            if info=$(curl -fsS "$url"); then
+              echo "$module@$VERSION is on the proxy: $info"
+              exit 0
+            fi
+            [ "$delay" = 0 ] && break
+            echo "Not on the proxy yet; retrying in ${delay}s."
+            sleep "$delay"
+          done
+          echo "::error::$module@$VERSION could not be fetched from $url"
+          exit 1
