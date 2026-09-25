@@ -50,6 +50,8 @@ type fakeAPI struct {
 	richAfter int
 
 	addHook func() // called inside AddRemoteFileContext, outside the lock
+	// noFileID makes files.remote.add return a file without an ID.
+	noFileID bool
 
 	users        map[string]*slack.User
 	userErr      error
@@ -70,6 +72,10 @@ func (f *fakeAPI) AddRemoteFileContext(_ context.Context, p slack.RemoteFilePara
 	f.adds = append(f.adds, remoteAdd{params: p, preview: preview})
 	hook := f.addHook
 	aerr := f.addErr
+	fileID := "F1"
+	if f.noFileID {
+		fileID = ""
+	}
 	f.mu.Unlock()
 	if hook != nil {
 		hook()
@@ -77,7 +83,7 @@ func (f *fakeAPI) AddRemoteFileContext(_ context.Context, p slack.RemoteFilePara
 	if aerr != nil {
 		return nil, aerr
 	}
-	return &slack.RemoteFile{ID: "F1", ExternalID: p.ExternalID}, nil
+	return &slack.RemoteFile{ID: fileID, ExternalID: p.ExternalID}, nil
 }
 
 func (f *fakeAPI) GetRemoteFileInfoContext(_ context.Context, externalID, _ string) (*slack.RemoteFile, error) {
@@ -223,6 +229,9 @@ func baseConfig(baseURL string) *config.Config {
 		// The preview wait is exercised by its own test; elsewhere it would only
 		// add polling to every case.
 		PreviewWait:        config.TOMLDuration{Duration: 0},
+		CardStyle:          config.CardStyleImage,
+		CardFaviconURL:     config.DefaultCardFaviconURL,
+		CardCaption:        "Open in Screenshotter",
 		RequestTimeout:     config.TOMLDuration{Duration: 5 * time.Second},
 		MaxConcurrency:     50,
 		MaxImageWorkers:    4,
@@ -286,12 +295,14 @@ func linkEvent() *slackevents.LinkSharedEvent {
 	}
 }
 
-func TestRenderUnfurlsWithASingleFileBlock(t *testing.T) {
+func TestFileStyleUnfurlsWithASingleFileBlock(t *testing.T) {
 	srv := pngServer(t, testPNG(t, 800, 600))
 	defer srv.Close()
 
 	api := &fakeAPI{}
-	b := newTestBridge(t, api, baseConfig(srv.URL))
+	cfg := baseConfig(srv.URL)
+	cfg.CardStyle = config.CardStyleFile
+	b := newTestBridge(t, api, cfg)
 	b.HandleLinkShared(context.Background(), "T1", linkEvent())
 
 	if len(api.adds) != 1 {
@@ -313,6 +324,130 @@ func TestRenderUnfurlsWithASingleFileBlock(t *testing.T) {
 	// message is being edited; without it Slack renders "[no preview available]".
 	if want := api.adds[0].params.Title; att.Fallback != want {
 		t.Errorf("unfurl fallback = %q, want the card title %q", att.Fallback, want)
+	}
+}
+
+// imageCard splits an image-style unfurl into its image block and its footer's
+// elements, failing unless it has exactly those two blocks.
+func imageCard(t *testing.T, att slack.Attachment) (*slack.ImageBlock, []slack.MixedElement) {
+	t.Helper()
+	blocks := att.Blocks.BlockSet
+	if len(blocks) != 2 {
+		t.Fatalf("image card should carry exactly two blocks, got %d: %v", len(blocks), blocks)
+	}
+	img, ok := blocks[0].(*slack.ImageBlock)
+	if !ok {
+		t.Fatalf("first block should be an image block, got %T", blocks[0])
+	}
+	footer, ok := blocks[1].(*slack.ContextBlock)
+	if !ok {
+		t.Fatalf("second block should be a context block, got %T", blocks[1])
+	}
+	return img, footer.ContextElements.Elements
+}
+
+// footerLink returns the mrkdwn text of the footer's last element, the link.
+func footerLink(t *testing.T, elems []slack.MixedElement) string {
+	t.Helper()
+	if len(elems) == 0 {
+		t.Fatal("footer is empty")
+	}
+	txt, ok := elems[len(elems)-1].(*slack.TextBlockObject)
+	if !ok || txt.Type != slack.MarkdownType {
+		t.Fatalf("footer should end with a mrkdwn text element, got %#v", elems[len(elems)-1])
+	}
+	return txt.Text
+}
+
+func TestImageStyleShowsTheRemoteFileOverAFooterLink(t *testing.T) {
+	srv, _ := pngServerWithMeta(t, testPNG(t, 800, 600), "My page", "")
+	defer srv.Close()
+
+	api := &fakeAPI{}
+	b := newTestBridge(t, api, baseConfig(srv.URL))
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	att := unfurlFor(t, api, "https://screen.corp.example/abcdef")
+	img, footer := imageCard(t, att)
+	// The image block draws the file files.remote.add just returned.
+	if img.SlackFile == nil || img.SlackFile.ID != "F1" || img.ImageURL != "" {
+		t.Errorf("image block should reference file F1 and no image_url, got slack_file %#v, image_url %q", img.SlackFile, img.ImageURL)
+	}
+	if img.AltText != "My page" || img.Title == nil || img.Title.Text != "My page" || img.Title.Type != slack.PlainTextType {
+		t.Errorf("image block alt_text/title = %q/%#v, want the card title", img.AltText, img.Title)
+	}
+	if len(footer) != 2 {
+		t.Fatalf("footer should hold the icon and the link, got %d elements", len(footer))
+	}
+	icon, ok := footer[0].(*slack.ImageBlockElement)
+	if !ok || icon.ImageURL == nil || *icon.ImageURL != config.DefaultCardFaviconURL {
+		t.Errorf("footer icon = %#v, want an image element for %q", footer[0], config.DefaultCardFaviconURL)
+	}
+	if got, want := footerLink(t, footer), "<"+srv.URL+"/abcdef|Open in Screenshotter>"; got != want {
+		t.Errorf("footer link = %q, want %q", got, want)
+	}
+	// hide_color cannot be combined with an image block: Slack rejects it.
+	if att.HideColor {
+		t.Error("image card must not set hide_color")
+	}
+	if att.Fallback != "My page" {
+		t.Errorf("unfurl fallback = %q, want the card title", att.Fallback)
+	}
+}
+
+func TestImageStyleWithoutAFaviconHasOnlyTheLink(t *testing.T) {
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	api := &fakeAPI{}
+	cfg := baseConfig(srv.URL)
+	cfg.CardFaviconURL = ""
+	b := newTestBridge(t, api, cfg)
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	_, footer := imageCard(t, unfurlFor(t, api, "https://screen.corp.example/abcdef"))
+	if len(footer) != 1 {
+		t.Fatalf("footer should hold only the link, got %d elements", len(footer))
+	}
+	footerLink(t, footer)
+}
+
+func TestImageStyleEscapesTheCaption(t *testing.T) {
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	api := &fakeAPI{}
+	cfg := baseConfig(srv.URL)
+	cfg.CardCaption = "Q&A <here>"
+	b := newTestBridge(t, api, cfg)
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+
+	_, footer := imageCard(t, unfurlFor(t, api, "https://screen.corp.example/abcdef"))
+	if got, want := footerLink(t, footer), "<"+srv.URL+"/abcdef|Q&amp;A &lt;here&gt;>"; got != want {
+		t.Errorf("footer link = %q, want %q", got, want)
+	}
+}
+
+func TestImageStyleSkipsTheUnfurlWithoutAFileID(t *testing.T) {
+	srv := pngServer(t, testPNG(t, 800, 600))
+	defer srv.Close()
+
+	// Without Slack's file ID there is nothing for the image block to show.
+	api := &fakeAPI{noFileID: true}
+	b := newTestBridge(t, api, baseConfig(srv.URL))
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+	if api.unfurls != 0 {
+		t.Errorf("expected no unfurl without a file ID, got %d", api.unfurls)
+	}
+
+	// The file style references the file by external ID and does not need it.
+	api = &fakeAPI{noFileID: true}
+	cfg := baseConfig(srv.URL)
+	cfg.CardStyle = config.CardStyleFile
+	b = newTestBridge(t, api, cfg)
+	b.HandleLinkShared(context.Background(), "T1", linkEvent())
+	if api.unfurls != 1 {
+		t.Errorf("the file style should unfurl without a file ID, got %d unfurls", api.unfurls)
 	}
 }
 

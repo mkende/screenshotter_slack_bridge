@@ -9,7 +9,7 @@
 #
 # Each recognised link is registered with Slack as a "remote file" whose preview
 # image Slack stores workspace-privately, and the link is replaced by a card
-# showing that preview. Clicking the card opens the screenshot's page on
+# showing that preview. The card links to the screenshot's page on
 # screenshotter_base_url, so only people who can reach your server see the
 # full-size image.
 
@@ -47,8 +47,8 @@ unfurl_domains = ["screen.corp.example"]
 # X-Screenshot-Title header on the image response, otherwise the page it was
 # captured from (X-Screenshot-Source-Url), otherwise "Screenshot <id>". The
 # source URL is also stored as the file's indexable contents, since the card has
-# no room to show it separately. A Slack file card cannot carry buttons, so there
-# is nothing to configure for those and Interactivity is not needed.
+# no room to show it separately. The card carries no buttons, so Interactivity is
+# not needed.
 
 # ---------------------------------------------------------------------------
 # Slack credentials
@@ -85,6 +85,36 @@ app_token_env_var = "SLACK_APP_TOKEN"
 # Set "0s" to unfurl immediately and skip the polling (and the
 # remote_files:read scope). Default: 8s.
 # preview_wait = "8s"
+
+# ---------------------------------------------------------------------------
+# Card appearance
+# ---------------------------------------------------------------------------
+
+# How the card presents the screenshot. Both styles show the same stored
+# preview; only the card around it differs.
+#  - "image": the whole preview, uncropped, under the title, with a footer line
+#    (card_favicon_url + card_caption) linking to the screenshot's page. Slack
+#    keeps a coloured bar down the card's left edge, which cannot be removed
+#    for this style. It relies on Slack drawing a remote file in an image
+#    block, which works but which Slack does not document.
+#  - "file": Slack's own file card, with a file icon, the title and "PNG" above
+#    the preview, which Slack crops to the card's shape; the whole card links to
+#    the screenshot's page.
+# Either way Slack adds its usual row with the file size and a collapse toggle.
+# Default: "image".
+# card_style = "image"
+
+# Icon shown at the start of the image card's footer. Slack's servers fetch it
+# when rendering the card, so it must be a public http(s) URL: a server that is
+# only reachable on your network cannot provide it, and the icon would render as
+# a blank space. If your server is publicly reachable, its own icon is at
+# <screenshotter_base_url>/assets/icon-64.png. Set "" for no icon. Unused by the
+# "file" style. Default: "https://screenshotter.org/favicon-32x32.png".
+# card_favicon_url = "https://screenshotter.org/favicon-32x32.png"
+
+# Text of the image card's footer link to the screenshot's page. At most 150
+# characters. Unused by the "file" style. Default: "Open in Screenshotter".
+# card_caption = "Open in Screenshotter"
 
 # ---------------------------------------------------------------------------
 # Limits (resource / abuse protection)

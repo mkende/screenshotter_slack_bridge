@@ -218,10 +218,11 @@ func (b *Bridge) HandleLinkShared(ctx context.Context, teamID string, ev *slacke
 
 // pendingShare is a screenshot registered with Slack and awaiting its unfurl.
 type pendingShare struct {
-	link  string // the URL as posted, which keys the unfurl
-	id    string // the image ID, for logging
-	extID string // the remote file registered for this share
-	title string // the card's title, reused as the attachment's plain-text fallback
+	link   string // the URL as posted, which keys the unfurl
+	id     string // the image ID, for logging
+	extID  string // the remote file registered for this share
+	fileID string // Slack's ID for that remote file, which an image block references
+	title  string // the card's title, reused as the attachment's plain-text fallback
 }
 
 // registerShare fetches the screenshot and registers this share of it as a
@@ -238,31 +239,73 @@ func (b *Bridge) registerShare(ctx context.Context, ev *slackevents.LinkSharedEv
 	}
 
 	sh := pendingShare{link: link, id: id, extID: shareExternalID(id, ev), title: previewTitle(id, meta)}
-	if err := b.addRemoteFile(ctx, sh, preview, meta); err != nil {
+	file, err := b.addRemoteFile(ctx, sh, preview, meta)
+	if err != nil {
 		return pendingShare{}, fmt.Errorf("files.remote.add: %s", slackErr(err))
+	}
+	if file != nil {
+		sh.fileID = file.ID
+	}
+	if sh.fileID == "" && b.cfg.CardStyle != config.CardStyleFile {
+		return pendingShare{}, errors.New("files.remote.add: response carries no file ID for the image block")
 	}
 	return sh, nil
 }
 
 // unfurlShare replaces the posted link with a card for its remote file.
 func (b *Bridge) unfurlShare(ctx context.Context, ev *slackevents.LinkSharedEvent, sh pendingShare) error {
-	// A file block must be the only block in the unfurl, so the title and the
-	// click-through both come from the remote file itself. HideColor drops the
-	// coloured bar down the card's left edge, which Slack allows only for a
-	// lone file block. Fallback is what clients show where blocks cannot be
-	// rendered — notably the chip standing in for the card while the message is
-	// being edited, which otherwise reads "[no preview available]".
-	unfurls := map[string]slack.Attachment{
-		sh.link: {
-			Fallback:  sh.title,
-			HideColor: true,
-			Blocks:    slack.Blocks{BlockSet: []slack.Block{slack.NewFileBlock("", sh.extID, "remote")}},
-		},
-	}
+	unfurls := map[string]slack.Attachment{sh.link: b.cardAttachment(sh)}
 	if err := b.unfurl(ctx, ev.Channel, ev.MessageTimeStamp, unfurls); err != nil {
 		return fmt.Errorf("unfurl: %s", slackErr(err))
 	}
 	return nil
+}
+
+// cardAttachment builds the unfurl for a share in the configured card style.
+// In both, Fallback is what clients show where blocks cannot be rendered —
+// notably the chip standing in for the card while the message is being edited,
+// which otherwise reads "[no preview available]".
+func (b *Bridge) cardAttachment(sh pendingShare) slack.Attachment {
+	if b.cfg.CardStyle == config.CardStyleFile {
+		// A file block must be the only block in the unfurl, so the title and
+		// the click-through both come from the remote file itself. HideColor
+		// drops the coloured bar down the card's left edge, which Slack allows
+		// only for a lone file block.
+		return slack.Attachment{
+			Fallback:  sh.title,
+			HideColor: true,
+			Blocks:    slack.Blocks{BlockSet: []slack.Block{slack.NewFileBlock("", sh.extID, "remote")}},
+		}
+	}
+
+	// The image style draws the remote file's stored preview, uncropped,
+	// through an image block's slack_file — which Slack accepts for remote files
+	// although it documents slack_file only for uploaded ones. The picture is
+	// not a link, so the click-through is a footer line of our own. HideColor is
+	// rejected alongside an image block (cannot_parse_attachment), so this card
+	// keeps Slack's colour bar.
+	image := slack.NewImageBlockSlackFile(&slack.SlackFileObject{ID: sh.fileID}, sh.title, "",
+		slack.NewTextBlockObject(slack.PlainTextType, sh.title, false, false))
+	var footer []slack.MixedElement
+	if b.cfg.CardFaviconURL != "" {
+		// Slack fetches this itself: a remote file renders blank here.
+		footer = append(footer, slack.NewImageBlockElement(b.cfg.CardFaviconURL, "Screenshotter"))
+	}
+	footer = append(footer, slack.NewTextBlockObject(slack.MarkdownType,
+		"<"+b.pageURL(sh.id)+"|"+escapeMrkdwn(b.cfg.CardCaption)+">", false, false))
+	return slack.Attachment{
+		Fallback: sh.title,
+		Blocks:   slack.Blocks{BlockSet: []slack.Block{image, slack.NewContextBlock("", footer...)}},
+	}
+}
+
+// mrkdwnEscaper escapes the three characters Slack's mrkdwn gives a meaning in
+// link text.
+var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// escapeMrkdwn makes s safe to embed as literal mrkdwn text.
+func escapeMrkdwn(s string) string {
+	return mrkdwnEscaper.Replace(s)
 }
 
 // shareExternalID returns the external_id registering one share of image id.
@@ -278,14 +321,14 @@ func shareExternalID(id string, ev *slackevents.LinkSharedEvent) string {
 	return id + "-" + ev.Channel + "-" + ev.MessageTimeStamp
 }
 
-// addRemoteFile registers the share as a remote file under its external ID.
-// The image ID names the preview upload and builds the external URL — the
-// screenshot's page on the canonical server, where the card's click-through
-// leads.
-func (b *Bridge) addRemoteFile(ctx context.Context, sh pendingShare, preview []byte, meta imageMeta) error {
+// addRemoteFile registers the share as a remote file under its external ID,
+// returning the file Slack created. The image ID names the preview upload and
+// builds the external URL — the screenshot's page on the canonical server,
+// where the file card's click-through leads.
+func (b *Bridge) addRemoteFile(ctx context.Context, sh pendingShare, preview []byte, meta imageMeta) (*slack.RemoteFile, error) {
 	actx, cancel := context.WithTimeout(ctx, b.cfg.RequestTimeout.Duration)
 	defer cancel()
-	_, err := b.api.AddRemoteFileContext(actx, slack.RemoteFileParameters{
+	return b.api.AddRemoteFileContext(actx, slack.RemoteFileParameters{
 		ExternalID:  sh.extID,
 		ExternalURL: b.pageURL(sh.id),
 		Title:       sh.title,
@@ -296,7 +339,6 @@ func (b *Bridge) addRemoteFile(ctx context.Context, sh pendingShare, preview []b
 		PreviewImageReader:    bytes.NewReader(preview),
 		PreviewImageName:      sh.id + ".png",
 	})
-	return err
 }
 
 // waitForPreviews blocks until Slack has parsed the preview image of every

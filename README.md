@@ -20,7 +20,7 @@ When someone posts a link on one of the domains you register, Slack delivers a
 `link_shared` event over the WebSocket. The bridge fetches the PNG from the
 Screenshotter server, registers it with Slack as a *remote file* whose preview
 Slack stores workspace-privately, and replaces the link with a card showing that
-preview. Clicking the card opens the screenshot's page on your server, so the
+preview. The card links to the screenshot's page on your server, so the
 full-size image never leaves your network.
 
 ## Container
@@ -80,6 +80,16 @@ The Slack app needs the `links:read`, `links:write`, `remote_files:write` and
 `remote_files:read` bot scopes, plus a `connections:write` app-level token for
 Socket Mode. The bridge assumes the server runs with
 `require_auth_to_view = false`: the image ID is the capability.
+
+### Card styles
+
+`card_style` picks how the card looks. The default, `"image"`, shows the whole
+preview under its title, followed by a footer line — an icon and a
+`card_caption` link ("Open in Screenshotter") to the screenshot's page. Slack
+fetches that icon, `card_favicon_url`, itself, so it must be a public URL; it
+defaults to the icon on screenshotter.org, and `""` removes it. `"file"` shows
+Slack's own file card instead, which crops the preview and puts a file header
+above it, but has no coloured bar down its left edge.
 
 ## Slack app setup
 

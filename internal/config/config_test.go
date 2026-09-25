@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,6 +81,63 @@ app_token = "xapp-app"
 	}
 	if cfg.PreviewWait.Duration != 8*time.Second {
 		t.Errorf("default preview_wait should be 8s, got %v", cfg.PreviewWait.Duration)
+	}
+	if cfg.CardStyle != CardStyleImage {
+		t.Errorf("default card_style should be %q, got %q", CardStyleImage, cfg.CardStyle)
+	}
+	if cfg.CardFaviconURL != DefaultCardFaviconURL {
+		t.Errorf("default card_favicon_url should be %q, got %q", DefaultCardFaviconURL, cfg.CardFaviconURL)
+	}
+	if cfg.CardCaption != "Open in Screenshotter" {
+		t.Errorf("default card_caption should be \"Open in Screenshotter\", got %q", cfg.CardCaption)
+	}
+}
+
+// minimalConfig is a valid configuration to which a test appends the keys under
+// test.
+const minimalConfig = `
+screenshotter_base_url = "http://internal:8080"
+unfurl_domains = ["screen.example"]
+bot_token = "xoxb-bot"
+app_token = "xapp-app"
+`
+
+func TestLoadCardSettings(t *testing.T) {
+	p := writeConfig(t, minimalConfig+`
+card_style = "file"
+card_favicon_url = ""
+card_caption = "  View screenshot  "
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CardStyle != CardStyleFile {
+		t.Errorf("card_style not parsed: %q", cfg.CardStyle)
+	}
+	if cfg.CardFaviconURL != "" {
+		t.Errorf("an empty card_favicon_url must disable the icon, got %q", cfg.CardFaviconURL)
+	}
+	if cfg.CardCaption != "View screenshot" {
+		t.Errorf("card_caption not trimmed: %q", cfg.CardCaption)
+	}
+}
+
+func TestLoadRejectsBadCardSettings(t *testing.T) {
+	cases := map[string]string{
+		"unknown style":        `card_style = "thumbnail"`,
+		"empty caption":        `card_caption = "   "`,
+		"overlong caption":     `card_caption = "` + strings.Repeat("x", 151) + `"`,
+		"non-http favicon":     `card_favicon_url = "ftp://example.com/icon.png"`,
+		"relative favicon":     `card_favicon_url = "/assets/icon-64.png"`,
+		"favicon with no host": `card_favicon_url = "https:///icon.png"`,
+	}
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, minimalConfig+line+"\n")); err == nil {
+				t.Errorf("expected an error for %s", line)
+			}
+		})
 	}
 }
 

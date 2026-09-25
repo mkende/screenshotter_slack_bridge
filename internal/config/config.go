@@ -8,11 +8,35 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/mkende/screenshotter_slack_bridge/internal/imageproc"
 )
+
+// CardStyle selects how an unfurled screenshot is presented in Slack. Both
+// styles show the same remote file; only the attachment built around it
+// differs.
+type CardStyle string
+
+const (
+	// CardStyleImage shows the preview through an image block, uncropped, with
+	// a footer linking to the screenshot's page. The default.
+	CardStyleImage CardStyle = "image"
+	// CardStyleFile shows the remote file's own card: Slack's file header
+	// (icon, title, filetype) over a cropped preview.
+	CardStyleFile CardStyle = "file"
+)
+
+// DefaultCardFaviconURL is the default icon in the image card's footer. Slack
+// fetches it from its own servers when rendering the card, so it must be
+// publicly reachable, which a (typically private) screenshotter server is not.
+const DefaultCardFaviconURL = "https://screenshotter.org/favicon-32x32.png"
+
+// maxCardCaptionLen bounds card_caption, in runes, well inside the 2000
+// characters Slack allows in a context block's text element.
+const maxCardCaptionLen = 150
 
 // Config holds the bridge's runtime configuration.
 type Config struct {
@@ -70,6 +94,23 @@ type Config struct {
 	// (~12s observed, against ~3s when the unfurl waits). 0 unfurls immediately.
 	// Default: 8s.
 	PreviewWait TOMLDuration `toml:"preview_wait"`
+
+	// CardStyle selects the unfurl's presentation: CardStyleImage (the
+	// preview, uncropped, over a footer linking to the screenshot's page) or
+	// CardStyleFile (Slack's file card, which crops the preview). Default:
+	// CardStyleImage.
+	CardStyle CardStyle `toml:"card_style"`
+
+	// CardFaviconURL is the icon shown in the image card's footer. Slack fetches
+	// it itself when rendering, so it must be an absolute http(s) URL reachable
+	// from the internet. Empty drops the icon. Unused by the file style.
+	// Default: DefaultCardFaviconURL.
+	CardFaviconURL string `toml:"card_favicon_url"`
+
+	// CardCaption is the text of the image card's footer link to the
+	// screenshot's page. Unused by the file style. Default: "Open in
+	// Screenshotter".
+	CardCaption string `toml:"card_caption"`
 
 	// RequestTimeout bounds each outbound request the bridge makes — both
 	// fetching an image from the screenshotter server and the Slack API calls
@@ -134,6 +175,9 @@ func Load(path string) (*Config, error) {
 	c := &Config{
 		MaxDimension:       1600,
 		PreviewWait:        TOMLDuration{8 * time.Second},
+		CardStyle:          CardStyleImage,
+		CardFaviconURL:     DefaultCardFaviconURL,
+		CardCaption:        "Open in Screenshotter",
 		RequestTimeout:     TOMLDuration{30 * time.Second},
 		MaxConcurrency:     50,
 		MaxImageWorkers:    4,
@@ -209,6 +253,24 @@ func (c *Config) validate() error {
 	}
 	if c.PreviewWait.Duration < 0 {
 		return fmt.Errorf("preview_wait must not be negative")
+	}
+	switch c.CardStyle {
+	case CardStyleImage, CardStyleFile:
+	default:
+		return fmt.Errorf("card_style must be %q or %q", CardStyleImage, CardStyleFile)
+	}
+	if c.CardFaviconURL != "" {
+		u, err := url.Parse(c.CardFaviconURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("card_favicon_url must be empty or an absolute http(s) URL")
+		}
+	}
+	c.CardCaption = strings.TrimSpace(c.CardCaption)
+	if c.CardCaption == "" {
+		return fmt.Errorf("card_caption must not be empty")
+	}
+	if utf8.RuneCountInString(c.CardCaption) > maxCardCaptionLen {
+		return fmt.Errorf("card_caption must be at most %d characters", maxCardCaptionLen)
 	}
 	if c.RequestTimeout.Duration <= 0 {
 		return fmt.Errorf("request_timeout must be positive")
