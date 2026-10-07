@@ -410,8 +410,8 @@ func (b *Bridge) imageFileURL(id string) string {
 
 // previewTitle returns the card's title: the title the server supplied, else
 // the page the screenshot was taken from (more informative than the ID alone),
-// else a fallback naming the image. A title longer than maxLen runes is cut to
-// maxLen, its last rune an ellipsis.
+// else a fallback naming the image. A title longer than maxLen runes is cut after
+// maxLen of them and followed by an ellipsis ("…").
 func previewTitle(id string, meta imageMeta, maxLen int) string {
 	title := meta.title
 	if title == "" {
@@ -421,7 +421,7 @@ func previewTitle(id string, meta imageMeta, maxLen int) string {
 		return "Screenshot " + id
 	}
 	if runes := []rune(title); len(runes) > maxLen {
-		return strings.TrimRightFunc(string(runes[:maxLen-1]), unicode.IsSpace) + "…"
+		return strings.TrimRightFunc(string(runes[:maxLen]), unicode.IsSpace) + "…"
 	}
 	return title
 }

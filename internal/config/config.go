@@ -119,7 +119,7 @@ type Config struct {
 	CardCaption string `toml:"card_caption"`
 
 	// CardTitleMaxLength caps the card's title, in characters (runes); longer
-	// titles are cut and end with an ellipsis. Applies to both styles. Must be
+	// titles are cut after that many and followed by an ellipsis ("…"). Applies to both styles. Must be
 	// between 1 and MaxCardTitleLength. Default: 90.
 	CardTitleMaxLength int `toml:"card_title_max_length"`
 

@@ -596,8 +596,8 @@ func TestPreviewTitleTruncatesLongTitles(t *testing.T) {
 	// The server does not cap stored titles, so the bridge must.
 	long := strings.Repeat("é", 140) // multi-byte: truncation is by rune
 	got := previewTitle("abcdef", imageMeta{title: long}, 90)
-	if n := len([]rune(got)); n != 90 {
-		t.Errorf("truncated title has %d runes, want 90", n)
+	if n := len([]rune(got)); n != 91 {
+		t.Errorf("truncated title has %d runes, want 90 plus the ellipsis", n)
 	}
 	if !strings.HasSuffix(got, "…") || !strings.HasPrefix(long, strings.TrimSuffix(got, "…")) {
 		t.Errorf("truncated title should be a prefix of the original plus an ellipsis, got %q", got)
@@ -606,7 +606,7 @@ func TestPreviewTitleTruncatesLongTitles(t *testing.T) {
 
 func TestPreviewTitleTruncation(t *testing.T) {
 	cases := []struct{ title, want string }{
-		{"exactly ten", "exactly t…"},
+		{"exactly ten", "exactly te…"},
 		{"0123456789", "0123456789"},     // at the limit: untouched
 		{"four five six", "four five…"},  // cut lands mid-word
 		{"four fiv  e six", "four fiv…"}, // trailing spaces before the ellipsis are dropped
