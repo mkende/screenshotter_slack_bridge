@@ -109,8 +109,8 @@ app_token_env_var = "SLACK_APP_TOKEN"
 # only reachable on your network cannot provide it, and the icon would render as
 # a blank space. If your server is publicly reachable, its own icon is at
 # <screenshotter_base_url>/assets/icon-64.png. Set "" for no icon. Unused by the
-# "file" style. Default: "https://screenshotter.org/favicon-32x32.png".
-# card_favicon_url = "https://screenshotter.org/favicon-32x32.png"
+# "file" style. Default: "https://www.screenshotter.org/favicon-32x32.png".
+# card_favicon_url = "https://www.screenshotter.org/favicon-32x32.png"
 
 # Text of the image card's footer link to the screenshot's page. At most 150
 # characters. Unused by the "file" style. Default: "Open in Screenshotter".

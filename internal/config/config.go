@@ -32,7 +32,7 @@ const (
 // DefaultCardFaviconURL is the default icon in the image card's footer. Slack
 // fetches it from its own servers when rendering the card, so it must be
 // publicly reachable, which a (typically private) screenshotter server is not.
-const DefaultCardFaviconURL = "https://screenshotter.org/favicon-32x32.png"
+const DefaultCardFaviconURL = "https://www.screenshotter.org/favicon-32x32.png"
 
 // maxCardCaptionLen bounds card_caption, in runes, well inside the 2000
 // characters Slack allows in a context block's text element.

@@ -87,7 +87,7 @@ Socket Mode. The bridge assumes the server runs with
 preview under its title, followed by a footer line — an icon and a
 `card_caption` link ("Open in Screenshotter") to the screenshot's page. Slack
 fetches that icon, `card_favicon_url`, itself, so it must be a public URL; it
-defaults to the icon on screenshotter.org, and `""` removes it. `"file"` shows
+defaults to the icon on www.screenshotter.org, and `""` removes it. `"file"` shows
 Slack's own file card instead, which crops the preview and puts a file header
 above it, but has no coloured bar down its left edge.
 
