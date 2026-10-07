@@ -91,6 +91,9 @@ app_token = "xapp-app"
 	if cfg.CardCaption != "Open in Screenshotter" {
 		t.Errorf("default card_caption should be \"Open in Screenshotter\", got %q", cfg.CardCaption)
 	}
+	if cfg.CardTitleMaxLength != 90 {
+		t.Errorf("default card_title_max_length should be 90, got %d", cfg.CardTitleMaxLength)
+	}
 }
 
 // minimalConfig is a valid configuration to which a test appends the keys under
@@ -107,6 +110,7 @@ func TestLoadCardSettings(t *testing.T) {
 card_style = "file"
 card_favicon_url = ""
 card_caption = "  View screenshot  "
+card_title_max_length = 40
 `)
 	cfg, err := Load(p)
 	if err != nil {
@@ -121,6 +125,9 @@ card_caption = "  View screenshot  "
 	if cfg.CardCaption != "View screenshot" {
 		t.Errorf("card_caption not trimmed: %q", cfg.CardCaption)
 	}
+	if cfg.CardTitleMaxLength != 40 {
+		t.Errorf("card_title_max_length not parsed: %d", cfg.CardTitleMaxLength)
+	}
 }
 
 func TestLoadRejectsBadCardSettings(t *testing.T) {
@@ -128,6 +135,8 @@ func TestLoadRejectsBadCardSettings(t *testing.T) {
 		"unknown style":        `card_style = "thumbnail"`,
 		"empty caption":        `card_caption = "   "`,
 		"overlong caption":     `card_caption = "` + strings.Repeat("x", 151) + `"`,
+		"zero title length":    `card_title_max_length = 0`,
+		"huge title length":    `card_title_max_length = 251`,
 		"non-http favicon":     `card_favicon_url = "ftp://example.com/icon.png"`,
 		"relative favicon":     `card_favicon_url = "/assets/icon-64.png"`,
 		"favicon with no host": `card_favicon_url = "https:///icon.png"`,

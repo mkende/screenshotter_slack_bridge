@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mkende/slack-go"
 	"github.com/mkende/slack-go/slackevents"
@@ -31,12 +32,6 @@ const maxImageBytes = 64 << 20 // 64 MiB
 
 // errNotFound is returned when the screenshotter server has no such image.
 var errNotFound = errors.New("image not found")
-
-// maxTitleLen bounds the title sent to Slack, in runes. The server does not cap
-// the title it stores, and while files.remote.add accepted 4000 characters in
-// testing it documents a bad_title error for overlong titles; a card shows one
-// line anyway.
-const maxTitleLen = 250
 
 // previewPollInterval is how often files.remote.info is polled while waiting for
 // Slack to finish parsing the preview image. Parsing took ~1.7-2.1s in testing.
@@ -238,7 +233,7 @@ func (b *Bridge) registerShare(ctx context.Context, ev *slackevents.LinkSharedEv
 		return pendingShare{}, fmt.Errorf("prepare preview: %w", err)
 	}
 
-	sh := pendingShare{link: link, id: id, extID: shareExternalID(id, ev), title: previewTitle(id, meta)}
+	sh := pendingShare{link: link, id: id, extID: shareExternalID(id, ev), title: previewTitle(id, meta, b.cfg.CardTitleMaxLength)}
 	file, err := b.addRemoteFile(ctx, sh, preview, meta)
 	if err != nil {
 		return pendingShare{}, fmt.Errorf("files.remote.add: %s", slackErr(err))
@@ -413,10 +408,11 @@ func (b *Bridge) imageFileURL(id string) string {
 	return b.cfg.FetchBaseURL() + "/" + id + ".png?no_redirect=1"
 }
 
-// previewTitle returns the card's title, truncated to what Slack will take:
-// the title the server supplied, else the page the screenshot was taken from
-// (more informative than the ID alone), else a fallback naming the image.
-func previewTitle(id string, meta imageMeta) string {
+// previewTitle returns the card's title: the title the server supplied, else
+// the page the screenshot was taken from (more informative than the ID alone),
+// else a fallback naming the image. A title longer than maxLen runes is cut to
+// maxLen, its last rune an ellipsis.
+func previewTitle(id string, meta imageMeta, maxLen int) string {
 	title := meta.title
 	if title == "" {
 		title = meta.sourceURL
@@ -424,8 +420,8 @@ func previewTitle(id string, meta imageMeta) string {
 	if title == "" {
 		return "Screenshot " + id
 	}
-	if runes := []rune(title); len(runes) > maxTitleLen {
-		return string(runes[:maxTitleLen])
+	if runes := []rune(title); len(runes) > maxLen {
+		return strings.TrimRightFunc(string(runes[:maxLen-1]), unicode.IsSpace) + "…"
 	}
 	return title
 }

@@ -38,6 +38,12 @@ const DefaultCardFaviconURL = "https://screenshotter.org/favicon-32x32.png"
 // characters Slack allows in a context block's text element.
 const maxCardCaptionLen = 150
 
+// MaxCardTitleLength is the largest card_title_max_length accepted, in runes.
+// The server does not cap the title it stores, and while files.remote.add
+// accepted 4000 characters in testing it documents a bad_title error for
+// overlong titles.
+const MaxCardTitleLength = 250
+
 // Config holds the bridge's runtime configuration.
 type Config struct {
 	// ScreenshotterBaseURL is the canonical base URL of the screenshotter server
@@ -112,6 +118,11 @@ type Config struct {
 	// Screenshotter".
 	CardCaption string `toml:"card_caption"`
 
+	// CardTitleMaxLength caps the card's title, in characters (runes); longer
+	// titles are cut and end with an ellipsis. Applies to both styles. Must be
+	// between 1 and MaxCardTitleLength. Default: 90.
+	CardTitleMaxLength int `toml:"card_title_max_length"`
+
 	// RequestTimeout bounds each outbound request the bridge makes — both
 	// fetching an image from the screenshotter server and the Slack API calls
 	// (remote file add/info, unfurl, user/usergroup lookups). Default: 30s.
@@ -178,6 +189,7 @@ func Load(path string) (*Config, error) {
 		CardStyle:          CardStyleImage,
 		CardFaviconURL:     DefaultCardFaviconURL,
 		CardCaption:        "Open in Screenshotter",
+		CardTitleMaxLength: 90,
 		RequestTimeout:     TOMLDuration{30 * time.Second},
 		MaxConcurrency:     50,
 		MaxImageWorkers:    4,
@@ -271,6 +283,9 @@ func (c *Config) validate() error {
 	}
 	if utf8.RuneCountInString(c.CardCaption) > maxCardCaptionLen {
 		return fmt.Errorf("card_caption must be at most %d characters", maxCardCaptionLen)
+	}
+	if c.CardTitleMaxLength < 1 || c.CardTitleMaxLength > MaxCardTitleLength {
+		return fmt.Errorf("card_title_max_length must be between 1 and %d", MaxCardTitleLength)
 	}
 	if c.RequestTimeout.Duration <= 0 {
 		return fmt.Errorf("request_timeout must be positive")

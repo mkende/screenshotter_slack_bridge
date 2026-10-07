@@ -116,6 +116,10 @@ app_token_env_var = "SLACK_APP_TOKEN"
 # characters. Unused by the "file" style. Default: "Open in Screenshotter".
 # card_caption = "Open in Screenshotter"
 
+# Longest card title, in characters; longer titles are cut and end with "…".
+# Applies to both styles. Between 1 and 250. Default: 90.
+# card_title_max_length = 90
+
 # ---------------------------------------------------------------------------
 # Limits (resource / abuse protection)
 # ---------------------------------------------------------------------------
