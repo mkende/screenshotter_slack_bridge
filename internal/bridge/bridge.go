@@ -19,8 +19,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/mkende/slack-go"
-	"github.com/mkende/slack-go/slackevents"
+	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
 
 	"github.com/mkende/screenshotter_slack_bridge/internal/config"
 	"github.com/mkende/screenshotter_slack_bridge/internal/imageproc"
@@ -63,7 +63,7 @@ type slackAPI interface {
 	AddRemoteFileContext(ctx context.Context, params slack.RemoteFileParameters) (*slack.RemoteFile, error)
 	GetRemoteFileInfoContext(ctx context.Context, externalID, fileID string) (*slack.RemoteFile, error)
 	UnfurlMessageContext(ctx context.Context, channelID, timestamp string, unfurls map[string]slack.Attachment, options ...slack.MsgOption) (string, string, string, error)
-	GetUserInfoContext(ctx context.Context, user string) (*slack.User, error)
+	GetUserInfoContext(ctx context.Context, user string, options ...slack.GetUserInfoOption) (*slack.User, error)
 	GetUserGroupMembersContext(ctx context.Context, userGroup string, options ...slack.GetUserGroupMembersOption) ([]string, error)
 }
 

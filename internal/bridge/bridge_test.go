@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mkende/slack-go"
-	"github.com/mkende/slack-go/slackevents"
+	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
 
 	"github.com/mkende/screenshotter_slack_bridge/internal/config"
 	"github.com/mkende/screenshotter_slack_bridge/internal/imageproc"
@@ -113,7 +113,7 @@ func (f *fakeAPI) UnfurlMessageContext(_ context.Context, _, _ string, unfurls m
 	return "", "", "", f.unfurlErr
 }
 
-func (f *fakeAPI) GetUserInfoContext(_ context.Context, user string) (*slack.User, error) {
+func (f *fakeAPI) GetUserInfoContext(_ context.Context, user string, _ ...slack.GetUserInfoOption) (*slack.User, error) {
 	if f.userErr != nil {
 		return nil, f.userErr
 	}
