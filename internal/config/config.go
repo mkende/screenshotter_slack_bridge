@@ -12,7 +12,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/mkende/screenshotter_slack_bridge/internal/imageproc"
+	"github.com/screenshotter-org/screenshotter_slack_bridge/internal/imageproc"
 )
 
 // CardStyle selects how an unfurled screenshot is presented in Slack. Both

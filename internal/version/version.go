@@ -7,7 +7,7 @@
 //
 // To embed a version in a local build:
 //
-//	go build -ldflags="-X github.com/mkende/screenshotter_slack_bridge/internal/version.Version=v1.2.3" ./cmd/screenshotter-slack-bridge
+//	go build -ldflags="-X github.com/screenshotter-org/screenshotter_slack_bridge/internal/version.Version=v1.2.3" ./cmd/screenshotter-slack-bridge
 package version
 
 import "runtime/debug"

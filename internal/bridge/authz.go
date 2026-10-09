@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mkende/screenshotter_slack_bridge/internal/config"
+	"github.com/screenshotter-org/screenshotter_slack_bridge/internal/config"
 )
 
 // authzCacheTTL bounds how long user-status and group-membership lookups are

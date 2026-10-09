@@ -13,7 +13,7 @@ RUN go mod download
 COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build \
-    -ldflags="-s -w -X github.com/mkende/screenshotter_slack_bridge/internal/version.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/screenshotter-org/screenshotter_slack_bridge/internal/version.Version=${VERSION}" \
     -o screenshotter-slack-bridge ./cmd/screenshotter-slack-bridge
 
 ## Runtime stage

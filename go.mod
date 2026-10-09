@@ -1,4 +1,4 @@
-module github.com/mkende/screenshotter_slack_bridge
+module github.com/screenshotter-org/screenshotter_slack_bridge
 
 go 1.26.0
 

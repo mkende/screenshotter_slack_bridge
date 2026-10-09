@@ -17,9 +17,9 @@ import (
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 
-	"github.com/mkende/screenshotter_slack_bridge/internal/bridge"
-	"github.com/mkende/screenshotter_slack_bridge/internal/config"
-	"github.com/mkende/screenshotter_slack_bridge/internal/version"
+	"github.com/screenshotter-org/screenshotter_slack_bridge/internal/bridge"
+	"github.com/screenshotter-org/screenshotter_slack_bridge/internal/config"
+	"github.com/screenshotter-org/screenshotter_slack_bridge/internal/version"
 )
 
 func main() {

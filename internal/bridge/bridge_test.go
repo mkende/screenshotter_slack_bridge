@@ -20,8 +20,8 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 
-	"github.com/mkende/screenshotter_slack_bridge/internal/config"
-	"github.com/mkende/screenshotter_slack_bridge/internal/imageproc"
+	"github.com/screenshotter-org/screenshotter_slack_bridge/internal/config"
+	"github.com/screenshotter-org/screenshotter_slack_bridge/internal/imageproc"
 )
 
 // remoteAdd is one recorded files.remote.add call, with the preview image read

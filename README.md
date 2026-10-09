@@ -4,7 +4,7 @@ Renders Screenshotter links posted in Slack as inline image previews. It
 connects to Slack over Socket Mode — an outbound WebSocket — and fetches
 screenshots over your own network, so the Screenshotter server needs no public
 exposure and no inbound path from Slack. See also the
-[Screenshotter server](https://github.com/mkende/screenshotter_server) it pairs
+[Screenshotter server](https://github.com/screenshotter-org/screenshotter_server) it pairs
 with.
 
 A pre-built container image is published at
@@ -41,7 +41,7 @@ must reach `*.slack.com` and the Screenshotter server.
 ## Install with Go
 
 ```sh
-go install github.com/mkende/screenshotter_slack_bridge/cmd/screenshotter-slack-bridge@latest
+go install github.com/screenshotter-org/screenshotter_slack_bridge/cmd/screenshotter-slack-bridge@latest
 ```
 
 No C compiler needed. Versions before `v0.2.0` cannot be installed this way:
